@@ -15,7 +15,17 @@ import { DEFAULT_WEIGHTS } from '../core/eval';
 import type { Move, Plan, SolveInput, SwapAdvice } from '../core/search';
 import type { SolveRequest, SolveResponse } from '../core/solver.worker';
 import { ScreenCapture } from '../capture/capture';
-import { readBoard, readHandSlot, type Frame, type Rect } from '../capture/recognize';
+import {
+  DEFAULT_DIGITS,
+  matchDigit,
+  readBoard,
+  readDigitSig,
+  readHandSlot,
+  type DigitSig,
+  type DigitTemplates,
+  type Frame,
+  type Rect,
+} from '../capture/recognize';
 import { track, type Snapshot } from '../capture/tracker';
 
 // ───────────── 상태 ─────────────
@@ -30,9 +40,15 @@ interface Slot {
 interface Calib {
   board: Rect | null;
   slots: (Rect | null)[];
+  /** 보유 능력 버튼의 숫자 영역 (선택) */
+  counters: Record<ItemKey, Rect | null>;
 }
 
+type ItemKey = 'dot' | 'swap';
+const ITEM_KEYS: ItemKey[] = ['dot', 'swap'];
+
 const CALIB_KEY = 'moamoa.calib.v1';
+const DIGITS_KEY = 'moamoa.digits.v1';
 const EFFORT = {
   fast: { beam: 60, finalists: 30 },
   normal: { beam: 150, finalists: 60 },
@@ -52,16 +68,42 @@ const state = {
   solveMs: 0,
   view: 'all' as 'all' | number,
   log: [] as string[],
+  digits: loadDigits(),
+  /** 화면에서 개수를 읽고 있는가 */
+  countFromScreen: { dot: false, swap: false } as Record<ItemKey, boolean>,
+  /** 처음 보는 숫자 모양 → 사용자에게 값을 물어본다 */
+  digitPrompt: { dot: null, swap: null } as Record<ItemKey, { sig: DigitSig; url: string } | null>,
 };
 
 function loadCalib(): Calib {
   try {
     const raw = localStorage.getItem(CALIB_KEY);
-    if (raw) return JSON.parse(raw) as Calib;
+    if (raw) return { counters: { dot: null, swap: null }, ...(JSON.parse(raw) as Partial<Calib>) } as Calib;
   } catch {
     /* 저장소 사용 불가 */
   }
-  return { board: null, slots: [null, null, null] };
+  return { board: null, slots: [null, null, null], counters: { dot: null, swap: null } };
+}
+
+function loadDigits(): DigitTemplates {
+  const out: DigitTemplates = structuredClone(DEFAULT_DIGITS);
+  try {
+    const raw = localStorage.getItem(DIGITS_KEY);
+    if (raw) for (const [d, sigs] of Object.entries(JSON.parse(raw) as DigitTemplates)) out[d] = [...new Set([...(out[d] ?? []), ...sigs])];
+  } catch {
+    /* 저장소 사용 불가 */
+  }
+  return out;
+}
+
+function learnDigit(sig: DigitSig, value: number) {
+  const list = (state.digits[value] ??= []);
+  if (!list.includes(sig)) list.push(sig);
+  try {
+    localStorage.setItem(DIGITS_KEY, JSON.stringify(state.digits));
+  } catch {
+    /* 무시 */
+  }
 }
 
 function saveCalib() {
@@ -382,7 +424,39 @@ function renderInventory() {
       requestSolve();
     };
     row.append(minus, n, plus);
+    if (state.countFromScreen[key]) {
+      const tag = document.createElement('small');
+      tag.className = 'tag';
+      tag.textContent = '화면';
+      tag.title = '게임 화면에서 읽은 값';
+      row.appendChild(tag);
+    }
     wrap.appendChild(row);
+
+    const prompt = state.digitPrompt[key];
+    if (prompt) {
+      const box = document.createElement('div');
+      box.className = 'digit-prompt';
+      box.innerHTML = `<img src="${prompt.url}" alt="" /><span>처음 보는 숫자입니다. 몇인가요?</span>`;
+      const btns = document.createElement('div');
+      btns.className = 'digit-btns';
+      for (let v = 0; v <= INVENTORY_CAP; v++) {
+        const b = document.createElement('button');
+        b.textContent = String(v);
+        b.onclick = () => {
+          learnDigit(prompt.sig, v);
+          state.digitPrompt[key] = null;
+          state.inventory[key] = v;
+          state.countFromScreen[key] = true;
+          addLog(`숫자 ${v} 학습 (${label})`);
+          appliedSig = '';
+          requestSolve();
+        };
+        btns.appendChild(b);
+      }
+      box.appendChild(btns);
+      wrap.appendChild(box);
+    }
   }
   const cap = document.createElement('div');
   cap.className = 'muted';
@@ -442,12 +516,15 @@ function tick() {
 
   const b = readBoard(frame, state.calib.board!);
   const slots = state.calib.slots.map((r) => readHandSlot(frame, r!));
+  const counts = readCounters(frame);
   const sig =
     b.rows.join(',') +
     '|' +
     b.items.map((it) => `${it.r}.${it.c}.${it.type}`).join(',') +
     '|' +
-    slots.map((s) => (s.used ? 'U' : `${s.type ?? '?'}${s.orient}`)).join(',');
+    slots.map((s) => (s.used ? 'U' : `${s.type ?? '?'}${s.orient}`)).join(',') +
+    '|' +
+    ITEM_KEYS.map((k) => counts[k]?.sig ?? '-').join(',');
   if (sig === lastSig) stable++;
   else {
     lastSig = sig;
@@ -471,8 +548,40 @@ function tick() {
   state.colors = b.colors;
   state.items = res.items;
   state.inventory = res.inventory;
+  // 화면에서 읽은 개수가 있으면 추적값보다 우선한다
+  for (const k of ITEM_KEYS) {
+    const c = counts[k];
+    state.countFromScreen[k] = c?.value != null;
+    state.digitPrompt[k] = null;
+    if (!c) continue;
+    if (c.value != null) state.inventory[k] = c.value;
+    else state.digitPrompt[k] = { sig: c.sig, url: cropUrl(frame, state.calib.counters[k]!) };
+  }
   state.hand = slots.map((s) => ({ type: s.type, orient: s.orient, used: s.used }));
   requestSolve();
+}
+
+/** 보유 능력 숫자 읽기. 영역이 없거나 숫자가 안 보이면 null, 모르는 모양이면 value=null */
+function readCounters(frame: Frame): Record<ItemKey, { sig: DigitSig; value: number | null } | null> {
+  const out = { dot: null, swap: null } as Record<ItemKey, { sig: DigitSig; value: number | null } | null>;
+  for (const k of ITEM_KEYS) {
+    const rect = state.calib.counters[k];
+    if (!rect) continue;
+    const sig = readDigitSig(frame, rect);
+    if (sig) out[k] = { sig, value: matchDigit(sig, state.digits) };
+  }
+  return out;
+}
+
+function cropUrl(frame: Frame & { image: CanvasImageSource }, r: Rect): string {
+  const scale = Math.max(1, Math.round(48 / r.h));
+  const cv = document.createElement('canvas');
+  cv.width = Math.round(r.w * scale);
+  cv.height = Math.round(r.h * scale);
+  const ctx = cv.getContext('2d')!;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(frame.image, r.x, r.y, r.w, r.h, 0, 0, cv.width, cv.height);
+  return cv.toDataURL();
 }
 
 setInterval(tick, 250);
@@ -540,12 +649,14 @@ $('effort').onchange = () => requestSolve();
 
 // ───────────── 영역 지정 ─────────────
 
-const TARGETS = ['보드', '조각 1', '조각 2', '조각 3'] as const;
+const TARGETS = ['보드', '조각 1', '조각 2', '조각 3', '점 찍기 개수', '바꿔 뽑기 개수'] as const;
 const TARGET_HELP = [
   '보드 격자(10×16)의 바깥 테두리에 딱 맞게 드래그하세요.',
   '1번 보유 조각의 흰 영역(블록 그림만, 글자·버튼 제외)을 드래그하세요.',
   '2번 보유 조각의 흰 영역을 드래그하세요.',
   '3번 보유 조각의 흰 영역을 드래그하세요.',
+  '(선택) 점 찍기 버튼 오른쪽 숫자 동그라미를 드래그하세요.',
+  '(선택) 바꿔 뽑기 버튼 오른쪽 숫자 동그라미를 드래그하세요.',
 ];
 let calibTarget = 0;
 const preview = $<HTMLCanvasElement>('preview');
@@ -553,11 +664,14 @@ const pctx = preview.getContext('2d')!;
 let drag: { x0: number; y0: number; x1: number; y1: number } | null = null;
 
 function getRect(i: number): Rect | null {
-  return i === 0 ? state.calib.board : state.calib.slots[i - 1];
+  if (i === 0) return state.calib.board;
+  if (i <= 3) return state.calib.slots[i - 1];
+  return state.calib.counters[ITEM_KEYS[i - 4]];
 }
 function setRect(i: number, r: Rect) {
   if (i === 0) state.calib.board = r;
-  else state.calib.slots[i - 1] = r;
+  else if (i <= 3) state.calib.slots[i - 1] = r;
+  else state.calib.counters[ITEM_KEYS[i - 4]] = r;
   saveCalib();
 }
 

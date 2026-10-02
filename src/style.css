@@ -422,3 +422,35 @@ button:disabled {
   max-width: 100%;
   cursor: crosshair;
 }
+
+.tag {
+  font-size: 11px;
+  color: var(--good);
+  border: 1px solid var(--good);
+  border-radius: 99px;
+  padding: 0 6px;
+}
+.digit-prompt {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border: 1px dashed var(--warn);
+  border-radius: 8px;
+  color: var(--warn);
+}
+.digit-prompt img {
+  height: 48px;
+  image-rendering: pixelated;
+  border-radius: 4px;
+}
+.digit-btns {
+  display: flex;
+  gap: 4px;
+  width: 100%;
+}
+.digit-btns button {
+  flex: 1;
+  padding: 4px 0;
+}

@@ -4,7 +4,7 @@ import { PNG } from 'pngjs';
 import { describe, expect, it } from 'vitest';
 import { rowsToStrings } from '../src/core/board';
 import { readBoard, readHandSlot, type Frame } from '../src/capture/recognize';
-import { readCell } from '../src/capture/recognize';
+import { DEFAULT_DIGITS, matchDigit, readCell, readDigitSig } from '../src/capture/recognize';
 import type { PieceType } from '../src/core/pieces';
 
 const load = (name: string): Frame => {
@@ -49,6 +49,20 @@ describe('보드 인식 (실제 게임 스크린샷)', () => {
     expect(readHandSlot(f, { x: 312, y: 155, w: 50, h: 60 })).toMatchObject({ type: 'ㅣ', used: false });
     expect(readHandSlot(f, { x: 312, y: 230, w: 50, h: 60 })).toMatchObject({ type: null, used: true });
     expect(readHandSlot(f, { x: 312, y: 305, w: 50, h: 60 })).toMatchObject({ type: 'ㅋ', used: false });
+  });
+});
+
+describe('보유 능력 개수', () => {
+  const f = load('board.png');
+  it('점 찍기 / 바꿔 뽑기 버튼의 숫자 0', () => {
+    for (const rect of [{ x: 392, y: 486, w: 22, h: 22 }, { x: 395, y: 522, w: 22, h: 22 }]) {
+      const sig = readDigitSig(f, rect);
+      expect(sig).toBe(DEFAULT_DIGITS['0'][0]);
+      expect(matchDigit(sig!, DEFAULT_DIGITS)).toBe(0);
+    }
+  });
+  it('모르는 모양이면 null', () => {
+    expect(matchDigit('2:##/##/##/##/##/##/##/##', DEFAULT_DIGITS)).toBeNull();
   });
 });
 

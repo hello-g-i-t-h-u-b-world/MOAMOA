@@ -247,3 +247,87 @@ export function orientIndexOf(type: PieceType, cells: Cell[]): number {
   const key = normalize(cells).key;
   return PIECES[type].orientations.findIndex((o) => o.key === key);
 }
+
+// ───────────── 보유 능력 개수 (버튼 오른쪽 동그라미 안의 노란 숫자) ─────────────
+
+/** 숫자 픽셀 (노란색) */
+function isDigitPixel([r, g, b]: RGB): boolean {
+  return r > 170 && g > 140 && b < 170 && r - b > 60;
+}
+
+/** 픽셀 폰트 숫자 모양. 숫자 높이를 8칸으로 보고 칸 단위로 샘플링한다. 예: "6:.####./##..##/…" */
+export type DigitSig = string;
+
+export function readDigitSig(f: Frame, rect: Rect): DigitSig | null {
+  const x0 = Math.max(0, Math.round(rect.x));
+  const y0 = Math.max(0, Math.round(rect.y));
+  const x1 = Math.min(f.width, Math.round(rect.x + rect.w));
+  const y1 = Math.min(f.height, Math.round(rect.y + rect.h));
+  let bx0 = Infinity;
+  let by0 = Infinity;
+  let bx1 = -1;
+  let by1 = -1;
+  for (let y = y0; y < y1; y++)
+    for (let x = x0; x < x1; x++)
+      if (isDigitPixel(pixel(f, x, y))) {
+        bx0 = Math.min(bx0, x);
+        by0 = Math.min(by0, y);
+        bx1 = Math.max(bx1, x + 1);
+        by1 = Math.max(by1, y + 1);
+      }
+  if (bx1 < 0 || by1 - by0 < 4) return null;
+  const unit = (by1 - by0) / 8;
+  const cols = Math.max(1, Math.round((bx1 - bx0) / unit));
+  const ux = (bx1 - bx0) / cols;
+  const rows: string[] = [];
+  for (let r = 0; r < 8; r++) {
+    let s = '';
+    for (let c = 0; c < cols; c++) {
+      const cx = bx0 + (c + 0.5) * ux;
+      const cy = by0 + (r + 0.5) * unit;
+      // 픽셀 x는 [x, x+1) 구간이므로 floor로 해당 픽셀을 고른다
+      let on = 0;
+      let n = 0;
+      for (let y = Math.floor(cy - unit * 0.3); y <= Math.floor(cy + unit * 0.3); y++)
+        for (let x = Math.floor(cx - ux * 0.3); x <= Math.floor(cx + ux * 0.3); x++) {
+          n++;
+          if (isDigitPixel(pixel(f, x, y))) on++;
+        }
+      s += on * 2 > n ? '#' : '.';
+    }
+    rows.push(s);
+  }
+  return `${cols}:${rows.join('/')}`;
+}
+
+/** 숫자 → 학습된 모양들 */
+export type DigitTemplates = Record<string, DigitSig[]>;
+
+/** 게임 스크린샷에서 얻은 기본 템플릿 */
+export const DEFAULT_DIGITS: DigitTemplates = {
+  '0': ['6:.####./##..##/##..##/##..##/##..##/##..##/##..##/.####.'],
+};
+
+function sigDistance(a: DigitSig, b: DigitSig): number {
+  const [ac, ab] = a.split(':');
+  const [bc, bb] = b.split(':');
+  if (ac !== bc || ab.length !== bb.length) return Infinity;
+  let d = 0;
+  for (let i = 0; i < ab.length; i++) if (ab[i] !== bb[i]) d++;
+  return d;
+}
+
+/** 가장 가까운 숫자. 충분히 비슷한 템플릿이 없으면 null */
+export function matchDigit(sig: DigitSig, templates: DigitTemplates, maxDist = 3): number | null {
+  let best: number | null = null;
+  let bestD = maxDist + 1;
+  for (const [digit, sigs] of Object.entries(templates))
+    for (const t of sigs) {
+      const d = sigDistance(sig, t);
+      if (d < bestD) {
+        bestD = d;
+        best = Number(digit);
+      }
+    }
+  return best;
+}
