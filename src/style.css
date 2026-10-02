@@ -466,3 +466,64 @@ button:disabled {
   padding: 3px 8px;
   font-size: 12px;
 }
+
+/* 추천을 보유 조각의 실제 색으로 표시 */
+.gc-blue {
+  background: #65cfff !important;
+}
+.gc-pink {
+  background: #f68ce6 !important;
+}
+.gc-yellow {
+  background: #ffe249 !important;
+}
+.gc-green {
+  background: #aad613 !important;
+}
+.cell.ghost.gc-blue,
+.cell.ghost.gc-pink,
+.cell.ghost.gc-yellow,
+.cell.ghost.gc-green {
+  animation: ghost-pulse 1.2s ease-in-out infinite;
+}
+@keyframes ghost-pulse {
+  50% {
+    filter: brightness(1.25);
+  }
+}
+.badge.gc-blue,
+.badge.gc-pink,
+.badge.gc-yellow,
+.badge.gc-green {
+  color: #1b2129;
+  text-shadow: none;
+}
+.shape.gc-blue,
+.shape.gc-pink,
+.shape.gc-yellow,
+.shape.gc-green {
+  background: none !important;
+}
+.shape.gc-blue {
+  color: #65cfff;
+}
+.shape.gc-pink {
+  color: #f68ce6;
+}
+.shape.gc-yellow {
+  color: #ffe249;
+}
+.shape.gc-green {
+  color: #aad613;
+}
+
+/* 고정 중 새로 떨어진 아이템 */
+.cell.new-drop {
+  animation: drop-blink 0.8s ease-in-out infinite;
+  box-shadow: 0 0 0 2px #fff inset;
+}
+@keyframes drop-blink {
+  50% {
+    filter: brightness(1.6);
+  }
+}

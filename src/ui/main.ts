@@ -35,6 +35,15 @@ interface Slot {
   /** 화면에 보이는 방향 (-1 = 모름) */
   orient: number;
   used: boolean;
+  /** 화면에서 읽은 블록 색 (blue / pink / yellow / green), 수동 입력이면 null */
+  color?: string | null;
+}
+
+/** 추천 단계 i(이동 m)의 색 클래스: 조각 색을 알면 그 색, 아니면 단계별 기본 색 */
+function moveColorClass(m: Move, i: number): string {
+  if (m.kind === 'dot') return 'ghost-dot';
+  const color = state.hand[m.slot]?.color;
+  return color ? `gc-${color}` : `ghost-${i % 4}`;
 }
 
 interface Calib {
@@ -185,6 +194,7 @@ worker.onmessage = (e: MessageEvent<SolveResponse>) => {
     state.solveMs = res.ms;
     state.view = 'all';
     state.locked = lockAfterSolve && !!res.plan;
+    newDrops.clear();
     if (state.locked) setStatus(`🔒 추천 고정 (${res.ms.toFixed(0)}ms) · 다음 블록을 받으면 다시 계산`, 'ok');
     else setStatus(`계산 완료 (${res.ms.toFixed(0)}ms)`, res.plan?.complete === false ? 'warn' : 'ok');
   } else {
@@ -288,12 +298,13 @@ function renderBoard() {
       el.textContent = '';
       if (filled) el.classList.add('filled', `c-${color}`);
       if (g !== undefined) {
-        el.classList.add('ghost', plan!.moves[g].kind === 'dot' ? 'ghost-dot' : `ghost-${g % 4}`);
+        el.classList.add('ghost', moveColorClass(plan!.moves[g], g));
         el.textContent = String(g + 1);
       } else if (item) {
         el.textContent = item.type === 'swap' ? '⇄' : '⊙';
         el.classList.add('item');
       }
+      if (item && newDrops.has(itemKey(item))) el.classList.add('new-drop');
       if (clearRows.has(r)) el.classList.add('clearing');
     }
 
@@ -350,7 +361,7 @@ function renderMoves() {
       renderMoves();
     };
     const badge = document.createElement('span');
-    badge.className = `badge ${m.kind === 'dot' ? 'ghost-dot' : `ghost-${i % 4}`}`;
+    badge.className = `badge ${moveColorClass(m, i)}`;
     badge.textContent = String(i + 1);
     li.appendChild(badge);
     const body = document.createElement('div');
@@ -363,7 +374,7 @@ function renderMoves() {
       body.innerHTML = `<b>${m.type}</b> <span class="muted">(${m.slot + 1}번 조각)</span>${
         op ? ` · <span class="op">${op}</span>` : ''
       }<br/>→ <b>${m.r + 1}행 ${m.c + 1}열</b> <span class="muted">(모양의 왼쪽 위 기준)</span>`;
-      li.appendChild(shapeEl(target, `ghost-${i % 4}`));
+      li.appendChild(shapeEl(target, moveColorClass(m, i)));
     }
     if (m.cleared.length) {
       const gained = plan.itemsGained.filter((it) => m.cleared.includes(it.r));
@@ -395,7 +406,7 @@ function renderHand() {
     card.appendChild(title);
     if (s.type && !s.used) {
       const o = PIECES[s.type].orientations[Math.max(0, s.orient)];
-      card.appendChild(shapeEl(o, 'plain'));
+      card.appendChild(shapeEl(o, s.color ? `gc-${s.color}` : 'plain'));
     } else {
       const p = document.createElement('div');
       p.className = 'slot-empty';
@@ -594,7 +605,7 @@ function tick() {
   live.rows = b.rows;
   live.colors = b.colors;
   live.items = res.items;
-  live.hand = slots.map((s) => ({ type: s.type, orient: s.orient, used: s.used }));
+  live.hand = slots.map((s) => ({ type: s.type, orient: s.orient, used: s.used, color: s.color }));
   state.inventory = res.inventory;
   // 화면에서 읽은 개수가 있으면 추적값보다 우선한다
   for (const k of ITEM_KEYS) {
@@ -655,6 +666,60 @@ function applyLive() {
 
 setInterval(tick, 250);
 
+// ───────────── 능력 드롭 확인 (1초마다) ─────────────
+
+const itemKey = (it: Item) => `${it.r},${it.c},${it.type}`;
+/** 새로 떨어진 아이템 → 처음 본 시각 (보드에서 깜빡임 표시) */
+const newDrops = new Map<string, number>();
+const NEW_DROP_MS = 5000;
+let knownItems = new Set<string>();
+let dropsPrimed = false;
+/** 이 시각까지 보인 아이템은 원래 있던 것으로 본다 (아이템 인정에 1초가 걸리므로 여유를 둔다) */
+let dropsBaselineUntil = 0;
+const DROP_BASELINE_MS = 2500;
+
+function checkDrops() {
+  if (!source || !calibReady() || state.paused) return;
+  const now = performance.now();
+  const cur = new Set(live.items.map(itemKey));
+  if (!dropsPrimed) {
+    dropsPrimed = true;
+    dropsBaselineUntil = now + DROP_BASELINE_MS;
+  }
+  if (now < dropsBaselineUntil) {
+    // 화면 공유를 시작했을 때 이미 있던 아이템은 '드롭'으로 보지 않는다
+    knownItems = cur;
+    return;
+  }
+  let changed = false;
+  for (const it of live.items) {
+    if (knownItems.has(itemKey(it))) continue;
+    newDrops.set(itemKey(it), now);
+    addLog(`${it.type === 'dot' ? '⊙ 점 찍기' : '⇄ 바꿔 뽑기'} 드롭: ${it.r + 1}행 ${it.c + 1}열`);
+    changed = true;
+  }
+  knownItems = cur;
+  for (const [k, t] of newDrops)
+    if (now - t > NEW_DROP_MS) {
+      newDrops.delete(k);
+      changed = true;
+    }
+  // 추천 고정 중: 블록·추천은 그대로 두고 보드의 아이템 표시만 갱신한다
+  if (state.locked) {
+    const shown = new Set(state.items.map(itemKey));
+    if (shown.size !== cur.size || [...cur].some((k) => !shown.has(k))) {
+      state.items = live.items.slice();
+      changed = true;
+    }
+  }
+  if (changed) {
+    renderBoard();
+    renderInventory();
+  }
+}
+
+setInterval(checkDrops, 1000);
+
 $('btnCapture').onclick = async () => {
   if (capture.active) {
     capture.stop();
@@ -665,6 +730,7 @@ $('btnCapture').onclick = async () => {
     source = capture;
     prevSnap = null;
     itemConfirmer.reset();
+    dropsPrimed = false;
     appliedSig = '';
     $('btnCapture').textContent = '화면 공유 중지';
     addLog('화면 공유 시작');
@@ -693,6 +759,7 @@ $<HTMLInputElement>('fileInput').onchange = async (e) => {
   source = { grab: () => ({ data: img.data, width: img.width, height: img.height, image: cv }) };
   prevSnap = null;
   itemConfirmer.reset();
+  dropsPrimed = false;
   appliedSig = '';
   addLog(`이미지 열기: ${file.name} (${img.width}×${img.height})`);
   if (!calibReady()) openCalib();
@@ -717,6 +784,7 @@ $('btnReset').onclick = () => {
   live.hand = [];
   prevSnap = null;
   itemConfirmer.reset();
+  dropsPrimed = false;
   appliedSig = '';
   requestSolve();
 };

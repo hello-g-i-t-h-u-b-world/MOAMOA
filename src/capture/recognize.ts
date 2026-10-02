@@ -169,14 +169,23 @@ export interface HandRead {
   used: boolean;
   /** 인식했지만 목록에 없는 모양 */
   unknown: boolean;
+  /** 블록 색 (blue / pink / yellow / green) */
+  color: string | null;
+  /** 사용자가 클릭해 선택한 상태 (카드 배경이 연노랑) */
+  selected: boolean;
 }
 
 function isWhite([r, g, b]: RGB): boolean {
   return r > 215 && g > 215 && b > 215 && sat([r, g, b]) < 30;
 }
 
+/** 조각을 클릭했을 때의 연노랑 카드 배경. 노랑 블록(B ≤ 120)과는 B로 구분된다. */
+function isSelectedBg([r, g, b]: RGB): boolean {
+  return r > 235 && g > 215 && b >= 130 && b <= 225;
+}
+
 function isPieceColor(p: RGB): boolean {
-  return sat(p) > 70 && !isWhite(p);
+  return sat(p) > 70 && !isWhite(p) && !isSelectedBg(p);
 }
 
 /**
@@ -191,21 +200,24 @@ export function readHandSlot(f: Frame, rect: Rect): HandRead {
   const colHist = new Array<number>(x1 - x0).fill(0);
   const rowHist = new Array<number>(y1 - y0).fill(0);
   let white = 0;
+  let selectedBg = 0;
   let total = 0;
   for (let y = y0; y < y1; y++)
     for (let x = x0; x < x1; x++) {
       const p = pixel(f, x, y);
       total++;
       if (isWhite(p)) white++;
+      else if (isSelectedBg(p)) selectedBg++;
       else if (isPieceColor(p)) {
         colHist[x - x0]++;
         rowHist[y - y0]++;
       }
     }
-  const none: HandRead = { type: null, orient: -1, used: false, unknown: false };
+  const selected = selectedBg > white;
+  const none: HandRead = { type: null, orient: -1, used: false, unknown: false, color: null, selected };
   if (total === 0) return none;
-  // '사용 완료' 상태면 흰 배경이 사라진다
-  if (white / total < 0.3) return { ...none, used: true };
+  // '사용 완료' 상태면 흰(또는 선택된 연노랑) 배경이 사라진다
+  if ((white + selectedBg) / total < 0.3) return { ...none, used: true, selected: false };
 
   // 블록의 가로/세로 투영은 항상 끊김이 없으므로, 가장 긴 연속 구간을 블록으로 본다
   // (영역 가장자리에 걸린 패널 테두리 등을 걸러낸다)
@@ -254,7 +266,22 @@ export function readHandSlot(f: Frame, rect: Rect): HandRead {
   }
   if (!best) return { ...none, unknown: true };
   const b = best as { type: PieceType; orient: number; miss: number; area: number };
-  return { type: b.type, orient: b.orient, used: false, unknown: false };
+
+  // 색: 블록 칸 중심 픽셀들의 다수결
+  const o = PIECES[b.type].orientations[b.orient];
+  const px = bw / o.w;
+  const py = bh / o.h;
+  const votes = new Map<string, number>();
+  for (const [r, c] of o.cells) {
+    const cx = x0 + bx0 + (c + 0.5) * px;
+    const cy = y0 + by0 + (r + 0.5) * py;
+    for (const p of patch(f, cx - px * 0.3, cy - py * 0.3, cx + px * 0.3, cy + py * 0.3)) {
+      const k = classify(p);
+      if (k && k !== 'empty') votes.set(k, (votes.get(k) ?? 0) + 1);
+    }
+  }
+  const color = [...votes].sort((a, c) => c[1] - a[1])[0]?.[0] ?? null;
+  return { type: b.type, orient: b.orient, used: false, unknown: false, color, selected };
 }
 
 /** 셀 목록을 해당 블록 방향 인덱스로 변환 (수동 입력용) */

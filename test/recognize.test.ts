@@ -46,9 +46,9 @@ describe('보드 인식 (실제 게임 스크린샷)', () => {
   });
 
   it('보유 조각: ㅣ / 사용 완료 / ㅋ', () => {
-    expect(readHandSlot(f, { x: 312, y: 155, w: 50, h: 60 })).toMatchObject({ type: 'ㅣ', used: false });
+    expect(readHandSlot(f, { x: 312, y: 155, w: 50, h: 60 })).toMatchObject({ type: 'ㅣ', color: 'blue', used: false, selected: false });
     expect(readHandSlot(f, { x: 312, y: 230, w: 50, h: 60 })).toMatchObject({ type: null, used: true });
-    expect(readHandSlot(f, { x: 312, y: 305, w: 50, h: 60 })).toMatchObject({ type: 'ㅋ', used: false });
+    expect(readHandSlot(f, { x: 312, y: 305, w: 50, h: 60 })).toMatchObject({ type: 'ㅋ', color: 'yellow', used: false });
   });
 });
 
@@ -154,16 +154,24 @@ describe('아이템 아이콘', () => {
 });
 
 describe('보유 조각 인식 (조각별 스크린샷)', () => {
-  const cases: [number, PieceType][] = [
-    [2, '·'], [3, 'ㅈ'], [4, 'ㄷ'], [5, 'ㅣ'], [6, 'ㅌ'], [7, 'ㅅ'], [8, 'ㄹ'], [9, 'ㅇ'],
-    [10, 'ㄴ'], [11, 'ㅡ'], [12, 'ㅎ'], [13, 'ㄱ'], [14, 'ㅋ'], [15, 'ㅁ'], [16, 'ㅑ'],
-    [18, 'ㅅ'], [19, 'ㅈ'], [20, 'ㅎ'], [21, 'ㅂ'], [22, 'ㅊ'], [23, 'ㅍ'], [24, 'ㅏ'],
+  const cases: [number, PieceType, string][] = [
+    [2, '·', 'pink'], [3, 'ㅈ', 'green'], [4, 'ㄷ', 'pink'], [5, 'ㅣ', 'blue'], [6, 'ㅌ', 'yellow'],
+    [7, 'ㅅ', 'green'], [8, 'ㄹ', 'pink'], [9, 'ㅇ', 'green'], [10, 'ㄴ', 'pink'], [11, 'ㅡ', 'blue'],
+    [12, 'ㅎ', 'yellow'], [13, 'ㄱ', 'pink'], [14, 'ㅋ', 'yellow'], [15, 'ㅁ', 'green'], [16, 'ㅑ', 'blue'],
+    [18, 'ㅅ', 'green'], [19, 'ㅈ', 'green'], [20, 'ㅎ', 'yellow'], [21, 'ㅂ', 'green'], [22, 'ㅊ', 'yellow'],
+    [23, 'ㅍ', 'yellow'], [24, 'ㅏ', 'blue'],
   ];
-  for (const [n, type] of cases) {
-    it(`${n}번 → ${type}`, () => {
+  for (const [n, type, color] of cases) {
+    it(`${n}번 → ${type} (${color})`, () => {
       const f = load(`piece-${String(n).padStart(2, '0')}.png`);
       const rect = { x: 12, y: 10, w: Math.round(f.width * 0.48) - 12, h: f.height - 22 };
-      expect(readHandSlot(f, rect).type).toBe(type);
+      expect(readHandSlot(f, rect)).toMatchObject({ type, color, used: false });
     });
   }
+
+  it('클릭해서 노랗게 선택된 조각도 그대로 인식 (사용 완료로 보지 않음)', () => {
+    const f = load('hand-selected.png');
+    const rect = { x: 12, y: 10, w: Math.round(f.width * 0.48) - 12, h: f.height - 22 };
+    expect(readHandSlot(f, rect)).toMatchObject({ type: 'ㅡ', color: 'blue', used: false, selected: true });
+  });
 });
