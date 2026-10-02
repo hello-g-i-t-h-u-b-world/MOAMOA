@@ -646,3 +646,69 @@ button:disabled {
   border-radius: 99px;
   padding: 1px 8px;
 }
+
+/* 지금 할 일 */
+.now-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: min(100%, 420px);
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--panel);
+  border: 2px solid var(--accent);
+}
+.now-step[hidden] {
+  display: none;
+}
+.now-step.done {
+  border-color: var(--good);
+}
+.now-step button {
+  flex: none;
+  padding: 6px 10px;
+}
+.now-body {
+  flex: 1;
+  min-width: 0;
+}
+.now-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent);
+}
+.now-step.done .now-title {
+  color: var(--good);
+  font-size: 15px;
+}
+.now-text {
+  font-size: 15px;
+  margin-top: 2px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.now-text .badge {
+  width: 22px;
+  height: 22px;
+}
+.now-text .op {
+  color: var(--g3);
+  font-weight: 600;
+}
+.now-text .clear {
+  color: var(--good);
+}
+
+/* 추천 순서: 마친 단계 / 지금 단계 / 이후 단계 */
+.move.done {
+  opacity: 0.45;
+}
+.move.now {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.move.later {
+  opacity: 0.8;
+}

@@ -17,6 +17,7 @@ import type { Move, Plan, SolveInput, SwapAdvice } from '../core/search';
 import type { SolveRequest, SolveResponse } from '../core/solver.worker';
 import { ScreenCapture } from '../capture/capture';
 import { learnedOnly, makeExport } from '../capture/digit-data';
+import { checkProgress, type ProgressResult } from '../core/progress';
 import {
   DEFAULT_DIGITS,
   matchDigit,
@@ -92,7 +93,12 @@ const state = {
   plan: null as Plan | null,
   swaps: null as SwapAdvice[] | null,
   solveMs: 0,
+  /** 보드에 보여줄 단계 ('all' = 전체, plan.moves.length = 모두 마침) */
   view: 'all' as 'all' | number,
+  /** 지금 안내 중인 단계 (사용자가 놓은 것을 확인하면 자동으로 넘어감) */
+  step: 0,
+  /** 지금 계획을 세울 때의 보드와 사용 완료 칸 (단계 진행 판단 기준) */
+  planBase: null as { rows: Rows; used: boolean[] } | null,
   log: [] as string[],
   digits: loadDigits(),
   /** 화면에서 개수를 읽고 있는가 */
@@ -237,11 +243,13 @@ function requestSolve(fromScreen = false) {
   const id = ++reqId;
   planReqId = id;
   swapReqId = id;
+  pendingPlanBase = { rows: input.rows.slice(), used: state.hand.map((s) => s.used) };
   worker.postMessage({ id, input } satisfies SolveRequest);
 }
 
 let planReqId = 0;
 let swapReqId = 0;
+let pendingPlanBase: { rows: Rows; used: boolean[] } | null = null;
 
 /**
  * 계획은 그대로 두고 바꿔 뽑기 분석만 다시 한다 (추천 고정 중 바꿔 뽑기를 얻은 경우 등).
@@ -278,7 +286,10 @@ worker.onmessage = (e: MessageEvent<SolveResponse>) => {
   if (res.kind === 'plan') {
     state.plan = res.plan;
     state.solveMs = res.ms;
-    state.view = 'all';
+    state.planBase = pendingPlanBase;
+    // 1단계부터 바로 보여준다
+    state.step = 0;
+    state.view = res.plan?.moves.length ? 0 : 'all';
     state.locked = lockAfterSolve && !!res.plan;
     newDrops.clear();
     if (state.locked) setStatus(`🔒 추천 고정 (${res.ms.toFixed(0)}ms) · 다음 블록을 받으면 다시 계산`, 'ok');
@@ -310,9 +321,25 @@ function moveCells(m: Move): [number, number][] {
 }
 
 /** 각 단계 직전의 보드 */
+/** 안내 단계를 바꾼다 (자동 진행·수동 버튼 공용) */
+function goToStep(step: number, auto = false) {
+  const plan = state.plan;
+  if (!plan) return;
+  const n = plan.moves.length;
+  const next = Math.max(0, Math.min(n, step));
+  if (auto && next > state.step) {
+    for (let k = state.step; k < next; k++) addLog(`✓ ${k + 1}단계 완료`);
+  }
+  state.step = next;
+  state.view = next;
+  renderBoard();
+  renderMoves();
+}
+
+/** 각 단계 직전의 보드 + 마지막에 모두 마친 보드 */
 function boardsBeforeMoves(plan: Plan): Rows[] {
   const out: Rows[] = [];
-  let rows = state.rows;
+  let rows = state.planBase?.rows ?? state.rows;
   for (const m of plan.moves) {
     out.push(rows);
     rows =
@@ -320,6 +347,7 @@ function boardsBeforeMoves(plan: Plan): Rows[] {
         ? placeDot(rows, m.r, m.c).rows
         : place(rows, PIECES[m.type].orientations[m.orient], m.r, m.c).rows;
   }
+  out.push(rows);
   return out;
 }
 
@@ -361,6 +389,7 @@ boardEl.addEventListener('contextmenu', (e) => {
 });
 
 function renderBoard() {
+  renderNowStep();
   const plan = state.plan;
   const before = plan ? boardsBeforeMoves(plan) : [];
   const base = plan && typeof state.view === 'number' ? before[state.view] : state.rows;
@@ -408,8 +437,49 @@ function renderBoard() {
     };
     tabs.appendChild(b);
   };
+  plan.moves.forEach((_, i) => mk(`${i < state.step ? '✓ ' : i === state.step ? '▶ ' : ''}${i + 1}단계`, i));
   mk('전체', 'all');
-  plan.moves.forEach((_, i) => mk(`${i + 1}단계`, i));
+}
+
+/** 보드 위 '지금 할 일' 안내 */
+function renderNowStep() {
+  const el = $('nowStep');
+  const plan = state.plan;
+  el.innerHTML = '';
+  el.hidden = !plan || plan.moves.length === 0;
+  if (!plan || el.hidden) return;
+  const n = plan.moves.length;
+  const prev = document.createElement('button');
+  prev.textContent = '◀';
+  prev.title = '이전 단계';
+  prev.disabled = state.step === 0;
+  prev.onclick = () => goToStep(state.step - 1);
+  const next = document.createElement('button');
+  next.textContent = '다음 ▶';
+  next.title = '이 단계를 마쳤다고 표시 (화면 인식이 놓쳤을 때)';
+  next.disabled = state.step >= n;
+  next.onclick = () => goToStep(state.step + 1);
+  const body = document.createElement('div');
+  body.className = 'now-body';
+  if (state.step >= n) {
+    el.className = 'now-step done';
+    body.innerHTML = `<div class="now-title">✓ 안내한 순서를 모두 놓았습니다</div><div class="now-text muted">다음 블록을 기다리는 중…</div>`;
+  } else {
+    const m = plan.moves[state.step];
+    el.className = 'now-step';
+    body.innerHTML = `<div class="now-title">지금 할 일 <span class="muted">${state.step + 1} / ${n}단계</span></div>
+      <div class="now-text"><span class="badge ${moveColorClass(m, state.step)} ${moveNumberClass(m)}">${state.step + 1}</span> ${moveSummary(m)}</div>`;
+  }
+  el.append(prev, body, next);
+}
+
+/** 한 줄 요약: 'ㅋ (3번 조각) · 회전 3번 → 2행 5열' */
+function moveSummary(m: Move): string {
+  if (m.kind === 'dot') return `<b>⊙ 점 찍기</b> → <b>${m.r + 1}행 ${m.c + 1}열</b>`;
+  const op = opText(m.slot, PIECES[m.type].orientations[m.orient]);
+  return `<b>${m.type}</b> <span class="muted">(${m.slot + 1}번 조각)</span>${op ? ` · <span class="op">${op}</span>` : ''} → <b>${m.r + 1}행 ${m.c + 1}열</b>${
+    m.cleared.length ? ` <span class="clear">✦ ${m.cleared.length}줄 제거</span>` : ''
+  }`;
 }
 
 function opText(slot: number, target: Orientation): string {
@@ -436,9 +506,15 @@ function renderMoves() {
   }
   plan.moves.forEach((m, i) => {
     const li = document.createElement('li');
-    li.className = `move ${state.view === i ? 'active' : ''}`;
+    const phase = i < state.step ? 'done' : i === state.step ? 'now' : 'later';
+    li.className = `move ${phase} ${state.view === i ? 'active' : ''}`;
+    // 마우스를 올리면 그 단계를 미리 보고, 벗어나면 지금 단계로 돌아간다
     li.onmouseenter = () => {
       state.view = i;
+      renderBoard();
+    };
+    li.onmouseleave = () => {
+      state.view = Math.min(state.step, plan.moves.length);
       renderBoard();
     };
     li.onclick = () => {
@@ -448,7 +524,7 @@ function renderMoves() {
     };
     const badge = document.createElement('span');
     badge.className = `badge ${moveColorClass(m, i)} ${moveNumberClass(m)}`;
-    badge.textContent = String(i + 1);
+    badge.textContent = i < state.step ? '✓' : String(i + 1);
     li.appendChild(badge);
     const body = document.createElement('div');
     body.className = 'move-body';
@@ -758,15 +834,28 @@ function tick() {
     hand: slots.map((s) => ({ type: s.type, used: s.used })),
   };
   const newBlocks = prevSnap !== null && receivedNewBlocks(prevSnap, snap);
-  // 계산으로 이어지는 변화(새 블록을 받음 / 고정 안 됨)라면 화면이 충분히 안정될 때까지 기다린다.
+  // 추천 고정 중: 사용자가 안내대로 놓았는지 확인 (다음 단계로 / 다르게 놓았으면 다시 계산)
+  const progress: ProgressResult =
+    state.locked && !newBlocks && state.plan && state.planBase
+      ? checkProgress(state.planBase.rows, state.plan.moves, state.planBase.used, state.step, b.rows, slots.map((s) => s.used))
+      : { kind: 'same' };
+  // 계산으로 이어지는 변화(새 블록을 받음 / 고정 안 됨 / 안내와 다르게 놓음)라면 화면이 충분히 안정될 때까지 기다린다.
   // 마지막 블록을 놓는 순간에는 줄 제거 이펙트와 새 블록이 함께 나타나기 때문이다.
-  if ((!state.locked || newBlocks) && (now - sigSince < SETTLE_MS || boardFilter.pending)) {
+  if (
+    (!state.locked || newBlocks || progress.kind === 'deviated') &&
+    (now - sigSince < SETTLE_MS || boardFilter.pending)
+  ) {
     setStatus('⏳ 화면이 안정되길 기다리는 중…', 'busy');
     return;
   }
   appliedSig = sig;
 
   const res = track(prevSnap, snap, live.items, state.inventory);
+  if (!prevSnap) {
+    // 화면을 처음 반영할 때 이미 있던 아이템은 '드롭'으로 보지 않는다
+    knownItems = new Set(res.items.map(itemKey));
+    dropsPrimed = true;
+  }
   prevSnap = snap;
   res.events.forEach(addLog);
   if (slots.some((s) => s.unknown)) addLog('인식할 수 없는 조각이 있습니다 (영역을 확인하세요)');
@@ -779,8 +868,15 @@ function tick() {
   // 화면에서 읽은 개수가 있으면 추적값보다 우선한다
   for (const k of ITEM_KEYS) if (state.countFromScreen[k] && countSmoothers[k].value != null) state.inventory[k] = countSmoothers[k].value!;
 
-  // 추천 고정 중: 블록을 옮기는 동안에는 화면을 바꾸지 않는다 (보유 능력 개수만 갱신)
+  // 추천 고정 중: 안내대로 놓으면 다음 단계로, 다르게 놓으면 남은 조각으로 다시 계산
   if (state.locked && !newBlocks) {
+    if (progress.kind === 'deviated') {
+      addLog(`추천과 다르게 놓아서 남은 조각으로 다시 계산합니다 (${progress.reason})`);
+      applyLive();
+      requestSolve(true);
+      return;
+    }
+    if (progress.kind === 'advanced') goToStep(progress.step, true);
     renderInventory();
     return;
   }
@@ -1053,24 +1149,14 @@ const itemKey = (it: Item) => `${it.r},${it.c},${it.type}`;
 const newDrops = new Map<string, number>();
 const NEW_DROP_MS = 5000;
 let knownItems = new Set<string>();
+/** 화면을 처음 반영했는가 (그때 있던 아이템이 기준) */
 let dropsPrimed = false;
-/** 이 시각까지 보인 아이템은 원래 있던 것으로 본다 (아이템 인정에 1초가 걸리므로 여유를 둔다) */
-let dropsBaselineUntil = 0;
-const DROP_BASELINE_MS = 2500;
 
 function checkDrops() {
   if (!source || !calibReady() || state.paused) return;
   const now = performance.now();
   const cur = new Set(live.items.map(itemKey));
-  if (!dropsPrimed) {
-    dropsPrimed = true;
-    dropsBaselineUntil = now + DROP_BASELINE_MS;
-  }
-  if (now < dropsBaselineUntil) {
-    // 화면 공유를 시작했을 때 이미 있던 아이템은 '드롭'으로 보지 않는다
-    knownItems = cur;
-    return;
-  }
+  if (!dropsPrimed) return;
   let changed = false;
   for (const it of live.items) {
     if (knownItems.has(itemKey(it))) continue;
