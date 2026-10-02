@@ -26,7 +26,7 @@ import {
   type Frame,
   type Rect,
 } from '../capture/recognize';
-import { track, type Snapshot } from '../capture/tracker';
+import { receivedNewBlocks, track, type Snapshot } from '../capture/tracker';
 
 // ───────────── 상태 ─────────────
 
@@ -63,6 +63,10 @@ const state = {
   inventory: { dot: 0, swap: 0 } as Inventory,
   calib: loadCalib(),
   paused: false,
+  /** 손패 3개를 받아 계산한 추천을 고정할지 */
+  lockEnabled: true,
+  /** 추천 고정 중 (다음 손패를 받을 때까지 화면·계산 멈춤) */
+  locked: false,
   plan: null as Plan | null,
   swaps: null as SwapAdvice[] | null,
   solveMs: 0,
@@ -134,7 +138,11 @@ function setStatus(msg: string, kind: 'idle' | 'busy' | 'ok' | 'warn' = 'idle') 
 const worker = new Worker(new URL('../core/solver.worker.ts', import.meta.url), { type: 'module' });
 let reqId = 0;
 
-function requestSolve() {
+let lockAfterSolve = false;
+
+function requestSolve(fromScreen = false) {
+  lockAfterSolve = fromScreen && state.lockEnabled;
+  state.locked = false;
   const effort = EFFORT[($('effort') as HTMLSelectElement).value as keyof typeof EFFORT];
   const input: SolveInput = {
     rows: state.rows.slice(),
@@ -163,7 +171,9 @@ worker.onmessage = (e: MessageEvent<SolveResponse>) => {
     state.plan = res.plan;
     state.solveMs = res.ms;
     state.view = 'all';
-    setStatus(`계산 완료 (${res.ms.toFixed(0)}ms)`, res.plan?.complete === false ? 'warn' : 'ok');
+    state.locked = lockAfterSolve && !!res.plan;
+    if (state.locked) setStatus(`🔒 추천 고정 (${res.ms.toFixed(0)}ms) · 다음 블록을 받으면 다시 계산`, 'ok');
+    else setStatus(`계산 완료 (${res.ms.toFixed(0)}ms)`, res.plan?.complete === false ? 'warn' : 'ok');
   } else {
     state.swaps = res.swaps;
   }
@@ -539,14 +549,16 @@ function tick() {
     items: b.items,
     hand: slots.map((s) => ({ type: s.type, used: s.used })),
   };
-  const res = track(prevSnap, snap, state.items, state.inventory);
+  const res = track(prevSnap, snap, live.items, state.inventory);
+  const newBlocks = prevSnap !== null && receivedNewBlocks(prevSnap, snap);
   prevSnap = snap;
   res.events.forEach(addLog);
   if (slots.some((s) => s.unknown)) addLog('인식할 수 없는 조각이 있습니다 (영역을 확인하세요)');
 
-  state.rows = b.rows;
-  state.colors = b.colors;
-  state.items = res.items;
+  live.rows = b.rows;
+  live.colors = b.colors;
+  live.items = res.items;
+  live.hand = slots.map((s) => ({ type: s.type, orient: s.orient, used: s.used }));
   state.inventory = res.inventory;
   // 화면에서 읽은 개수가 있으면 추적값보다 우선한다
   for (const k of ITEM_KEYS) {
@@ -557,8 +569,14 @@ function tick() {
     if (c.value != null) state.inventory[k] = c.value;
     else state.digitPrompt[k] = { sig: c.sig, url: cropUrl(frame, state.calib.counters[k]!) };
   }
-  state.hand = slots.map((s) => ({ type: s.type, orient: s.orient, used: s.used }));
-  requestSolve();
+
+  // 추천 고정 중: 블록을 옮기는 동안에는 화면을 바꾸지 않는다 (보유 능력 개수만 갱신)
+  if (state.locked && !newBlocks) {
+    renderInventory();
+    return;
+  }
+  applyLive();
+  requestSolve(true);
 }
 
 /** 보유 능력 숫자 읽기. 영역이 없거나 숫자가 안 보이면 null, 모르는 모양이면 value=null */
@@ -582,6 +600,21 @@ function cropUrl(frame: Frame & { image: CanvasImageSource }, r: Rect): string {
   ctx.imageSmoothingEnabled = false;
   ctx.drawImage(frame.image, r.x, r.y, r.w, r.h, 0, 0, cv.width, cv.height);
   return cv.toDataURL();
+}
+
+/** 화면에서 인식한 최신 상태 (추천 고정 중에도 계속 갱신) */
+const live = {
+  rows: emptyRows() as Rows,
+  colors: [] as (string | null)[][],
+  items: [] as Item[],
+  hand: [] as Slot[],
+};
+
+function applyLive() {
+  state.rows = live.rows;
+  state.colors = live.colors;
+  state.items = live.items;
+  if (live.hand.length) state.hand = live.hand;
 }
 
 setInterval(tick, 250);
@@ -640,12 +673,31 @@ $('btnReset').onclick = () => {
   state.items = [];
   state.hand = [0, 1, 2].map(() => ({ type: null, orient: -1, used: false }));
   state.inventory = { dot: 0, swap: 0 };
+  live.rows = emptyRows();
+  live.colors = [];
+  live.items = [];
+  live.hand = [];
   prevSnap = null;
   appliedSig = '';
   requestSolve();
 };
 
-$('effort').onchange = () => requestSolve();
+$('effort').onchange = () => requestSolve(state.locked);
+
+$('btnResolve').onclick = () => {
+  if (source) applyLive();
+  requestSolve(!!source);
+};
+
+$('btnLock').onclick = () => {
+  state.lockEnabled = !state.lockEnabled;
+  $('btnLock').textContent = `추천 고정: ${state.lockEnabled ? '켜짐' : '꺼짐'}`;
+  $('btnLock').classList.toggle('active', state.lockEnabled);
+  if (!state.lockEnabled && state.locked) {
+    state.locked = false;
+    appliedSig = '';
+  }
+};
 
 // ───────────── 영역 지정 ─────────────
 

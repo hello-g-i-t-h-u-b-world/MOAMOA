@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { emptyRows, place, rowsFromStrings, rowsToStrings } from '../src/core/board';
 import { PIECES, PIECE_TYPES, transformSteps } from '../src/core/pieces';
 import { solve } from '../src/core/search';
-import { track } from '../src/capture/tracker';
+import { receivedNewBlocks, track } from '../src/capture/tracker';
 
 describe('블록 정의', () => {
   it('19종, 칸 수가 게임 표기와 같다', () => {
@@ -101,5 +101,22 @@ describe('아이템 추적', () => {
     const prev = { rows: emptyRows(), items: [], hand };
     const cur = { rows: emptyRows(), items: [], hand: [{ type: 'ㅎ' as const, used: false }] };
     expect(track(prev, cur, [], { dot: 0, swap: 1 }).inventory.swap).toBe(0);
+  });
+});
+
+describe('추천 고정 해제 조건', () => {
+  const snap = (hand: [string | null, boolean][]) => ({
+    rows: emptyRows(),
+    items: [],
+    hand: hand.map(([type, used]) => ({ type: type as never, used })),
+  });
+  it('블록을 놓아 사용 완료가 되면 유지', () => {
+    expect(receivedNewBlocks(snap([['ㅣ', false], ['ㅋ', false], ['ㅎ', false]]), snap([['ㅣ', false], [null, true], ['ㅎ', false]]))).toBe(false);
+  });
+  it('사용 완료 칸에 새 블록이 생기면 해제', () => {
+    expect(receivedNewBlocks(snap([[null, true], [null, true], [null, true]]), snap([['ㅂ', false], ['ㅅ', false], ['ㅡ', false]]))).toBe(true);
+  });
+  it('바꿔 뽑기로 종류가 바뀌면 해제', () => {
+    expect(receivedNewBlocks(snap([['ㅣ', false], [null, true], ['ㅎ', false]]), snap([['ㅣ', false], [null, true], ['ㅏ', false]]))).toBe(true);
   });
 });

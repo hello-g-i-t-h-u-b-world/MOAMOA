@@ -92,8 +92,8 @@ export function detectItem(px: RGB[]): Item['type'] | null {
  */
 function classify([r, g, b]: RGB): string | 'empty' | null {
   if (b >= 245 && r < 170 && g > 155 && g < 215) return 'blue';
-  if (b < 70 && g > 160 && r > 235) return 'yellow';
-  if (b < 70 && g > 170 && r < 180) return 'green';
+  if (b < 120 && g > 160 && r > 235) return 'yellow';
+  if (b < 90 && g > 170 && r < 190) return 'green';
   if (r > 228 && b > 185 && g > 70 && g < 180) return 'pink';
   if (r < 105 && g >= 150 && g <= 215 && b >= 185 && b <= 235) return 'empty';
   return null;

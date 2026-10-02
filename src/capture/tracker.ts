@@ -83,3 +83,17 @@ export function track(prev: Snapshot | null, cur: Snapshot, tracked: Item[], inv
 
   return { items, inventory, events };
 }
+
+/**
+ * 새 블록을 받았는가 (추천 고정을 풀고 다시 계산할 때).
+ * - 사용 완료였던 칸에 블록이 다시 생김 → 다음 손패 3개
+ * - 칸의 블록 종류가 바뀜 → 바꿔 뽑기 (또는 인식 못 하던 칸을 인식)
+ * 블록을 놓아 칸이 '사용 완료'가 되는 것은 해당하지 않는다.
+ */
+export function receivedNewBlocks(prev: Snapshot, cur: Snapshot): boolean {
+  return cur.hand.some((s, i) => {
+    const p = prev.hand[i];
+    if (!p || s.used || !s.type) return false;
+    return p.used || p.type !== s.type;
+  });
+}
