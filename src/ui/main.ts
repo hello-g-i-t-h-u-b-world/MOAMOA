@@ -154,7 +154,16 @@ function addLog(msg: string) {
   renderLog();
 }
 
+/** 게임에서 조각을 선택(노란 카드)한 동안 화면 반영·계산을 멈춘 상태 */
+let selectionPaused = false;
+let statusBeforeSelection: { text: string; kind: string } | null = null;
+
 function setStatus(msg: string, kind: 'idle' | 'busy' | 'ok' | 'warn' = 'idle') {
+  // 조각 선택 중에는 '선택 중' 표시를 유지하고, 다른 상태는 선택이 끝난 뒤 보여준다
+  if (selectionPaused && !msg.startsWith('✋')) {
+    statusBeforeSelection = { text: msg, kind };
+    return;
+  }
   const el = $('status');
   el.textContent = msg;
   el.dataset.kind = kind;
@@ -574,10 +583,18 @@ function tick() {
   if (!$('calibPanel').hidden) drawPreview(frame);
   if (!calibReady() || state.paused) return;
 
+  const slots = state.calib.slots.map((r) => readHandSlot(frame, r!));
+  // 게임에서 조각을 클릭해 선택(노란 카드)한 동안에는 화면을 반영하지도, 계산하지도 않는다.
+  // (조각을 끌고 다니는 중의 보드 변화도 무시) 선택이 끝나면 그때 화면부터 다시 반영한다.
+  if (slots.some((s) => s.selected)) {
+    enterSelectionPause();
+    return;
+  }
+  leaveSelectionPause();
+
   const b = readBoard(frame, state.calib.board!);
   // 1초 이상 같은 자리에 보인 아이템만 인정 (줄 제거 번쩍임 등 걸러냄)
   const items = itemConfirmer.update(b.items, performance.now());
-  const slots = state.calib.slots.map((r) => readHandSlot(frame, r!));
   const counts = readCounters(frame);
   const sig =
     b.rows.join(',') +
@@ -652,6 +669,31 @@ function cropUrl(frame: Frame & { image: CanvasImageSource }, r: Rect): string {
   ctx.imageSmoothingEnabled = false;
   ctx.drawImage(frame.image, r.x, r.y, r.w, r.h, 0, 0, cv.width, cv.height);
   return cv.toDataURL();
+}
+
+// ───────────── 조각 선택 중 일시 정지 ─────────────
+
+
+function enterSelectionPause() {
+  if (selectionPaused) return;
+  selectionPaused = true;
+  const el = $('status');
+  statusBeforeSelection = { text: el.textContent ?? '', kind: el.dataset.kind ?? 'idle' };
+  setStatus('✋ 조각 선택 중 · 계산 멈춤', 'idle');
+}
+
+function leaveSelectionPause() {
+  if (!selectionPaused) return;
+  selectionPaused = false;
+  // 선택 중에 쌓인 '같은 화면' 판정을 버리고 지금 화면부터 다시 안정 여부를 본다
+  lastSig = '';
+  stable = 0;
+  if (statusBeforeSelection) {
+    const el = $('status');
+    el.textContent = statusBeforeSelection.text;
+    el.dataset.kind = statusBeforeSelection.kind;
+  }
+  statusBeforeSelection = null;
 }
 
 /** 화면에서 인식한 최신 상태 (추천 고정 중에도 계속 갱신) */
