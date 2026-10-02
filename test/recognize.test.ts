@@ -112,19 +112,44 @@ describe('아이템 아이콘', () => {
     expect(readBoard(f, BOARD).items.filter((it) => it.r === 10)).toEqual([]);
   });
 
-  it('하얗게 번쩍이는 줄은 아이템이 아니다', () => {
+  // 실제 게임의 줄 제거 이펙트 스크린샷(261×33)을 r행 중심에 덮는다
+  const withLineClear = (r: number, tint?: (rgb: [number, number, number]) => [number, number, number]): Frame => {
     const f = load('board.png');
+    const fx = load('line-clear-effect.png');
     const data = Uint8Array.from(f.data);
-    // 9행 전체를 흰색~하늘색 빛으로 덮는다
-    for (let y = 127 + 9 * 26; y < 127 + 10 * 26; y++)
-      for (let x = 33; x < 293; x++) {
-        const i = (y * f.width + x) * 4;
-        const t = ((x + y) % 7) / 7;
-        data[i] = Math.round(180 + 75 * t);
-        data[i + 1] = 245;
-        data[i + 2] = 255;
+    const oy = 127 + r * 26 + 13 - Math.floor(fx.height / 2);
+    for (let y = 0; y < fx.height; y++)
+      for (let x = 0; x < Math.min(fx.width, 260); x++) {
+        const ty = oy + y;
+        if (ty < 0 || ty >= f.height) continue;
+        const si = (y * fx.width + x) * 4;
+        const di = (ty * f.width + 33 + x) * 4;
+        let rgb: [number, number, number] = [fx.data[si], fx.data[si + 1], fx.data[si + 2]];
+        if (tint) rgb = tint(rgb);
+        [data[di], data[di + 1], data[di + 2]] = rgb;
       }
-    expect(readBoard({ ...f, data }, BOARD).items.filter((it) => it.r === 9)).toEqual([]);
+    return { ...f, data };
+  };
+
+  it('줄 제거 이펙트는 아이템이 아니고, 위아래 줄 인식에도 영향이 없다', () => {
+    const before = readBoard(load('board.png'), BOARD);
+    for (const r of [0, 5, 9, 12, 15]) {
+      const res = readBoard(withLineClear(r), BOARD);
+      // 원래 있던 아이템(이펙트가 덮은 줄 제외) 외에 새 아이템이 없어야 한다
+      expect(res.items).toEqual(before.items.filter((it) => it.r !== r));
+      for (let k = 0; k < 16; k++) if (k !== r) expect(res.rows[k]).toBe(before.rows[k]);
+    }
+  });
+
+  it('하늘색이 강한 이펙트 프레임도 아이템이 아니다', () => {
+    const before = readBoard(load('board.png'), BOARD);
+    // 다른 프레임을 가정: 빨강을 빼서 하늘색 반짝임으로 만든다
+    const cyan = ([r, g, b]: [number, number, number]): [number, number, number] =>
+      r > 150 && g > 150 ? [20, Math.max(g, 200), 255] : [r, g, b];
+    for (const r of [5, 9]) {
+      const res = readBoard(withLineClear(r, cyan), BOARD);
+      expect(res.items).toEqual(before.items.filter((it) => it.r !== r));
+    }
   });
 });
 
