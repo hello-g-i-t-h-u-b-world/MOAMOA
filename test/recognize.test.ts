@@ -177,6 +177,39 @@ describe('파란 블록 위의 점 찍기 (실제 스크린샷)', () => {
   });
 });
 
+describe('분홍 블록 위의 바꿔 뽑기 (실제 스크린샷 7행 7열)', () => {
+  const f = load('board.png');
+  const B = { x: 33, y: 127, w: 260, h: 416 };
+  const pinks: [number, number][] = [];
+  const base = readBoard(f, B);
+  for (let r = 0; r < 16; r++)
+    for (let c = 0; c < 10; c++) if (base.colors[r][c] === 'pink' && !(r === 6 && c === 6)) pinks.push([r, c]);
+
+  it('원본: 분홍 블록 + 바꿔 뽑기', () => {
+    expect(readCell(f, B, 6, 6)).toMatchObject({ filled: true, color: 'pink', item: 'swap' });
+  });
+
+  it('그 칸을 다른 분홍 블록 칸들에 옮겨 붙여도 똑같이 인식', () => {
+    expect(pinks.length).toBeGreaterThan(10);
+    for (const [r, c] of pinks) {
+      const data = Uint8Array.from(f.data);
+      for (let y = 0; y < 26; y++)
+        for (let x = 0; x < 26; x++) {
+          const si = ((127 + 6 * 26 + y) * f.width + 33 + 6 * 26 + x) * 4;
+          const di = ((127 + r * 26 + y) * f.width + 33 + c * 26 + x) * 4;
+          data[di] = f.data[si];
+          data[di + 1] = f.data[si + 1];
+          data[di + 2] = f.data[si + 2];
+        }
+      expect(readCell({ ...f, data }, B, r, c)).toMatchObject({ filled: true, color: 'pink', item: 'swap' });
+    }
+  });
+
+  it('아이콘 없는 분홍 블록은 바꿔 뽑기로 오인식하지 않는다', () => {
+    for (const [r, c] of pinks) expect(readCell(f, B, r, c).item).toBeNull();
+  });
+});
+
 describe('보유 조각 인식 (조각별 스크린샷)', () => {
   const cases: [number, PieceType, string][] = [
     [2, '·', 'pink'], [3, 'ㅈ', 'green'], [4, 'ㄷ', 'pink'], [5, 'ㅣ', 'blue'], [6, 'ㅌ', 'yellow'],

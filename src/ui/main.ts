@@ -569,6 +569,8 @@ let source: Source | null = null;
 let prevSnap: Snapshot | null = null;
 /** 직전 프레임의 (보정된) 보드 */
 let lastRows: Rows | null = null;
+/** 칸별 마지막으로 읽은 블록 색 */
+const lastColors: (string | null)[][] = Array.from({ length: H }, () => new Array<string | null>(W).fill(null));
 const itemConfirmer = new ItemConfirmer();
 let lastSig = '';
 let stable = 0;
@@ -598,6 +600,13 @@ function tick() {
   // 줄 제거가 아닌데 한두 칸만 비어 보이면 오인식 → 이전 상태 유지 (아이콘 빛에 가려진 블록 등)
   b.rows = stabilizeRows(lastRows, b.rows);
   lastRows = b.rows;
+  // 채워져 있는데 색을 못 읽은 칸(빛에 가려 복원된 칸 등)은 직전 색을 쓴다
+  for (let r = 0; r < H; r++)
+    for (let c = 0; c < W; c++)
+      if ((b.rows[r] >> c) & 1) {
+        if (b.colors[r][c]) lastColors[r][c] = b.colors[r][c];
+        else b.colors[r][c] = lastColors[r][c];
+      } else lastColors[r][c] = null;
   // 1초 이상 같은 자리에 보인 아이템만 인정 (줄 제거 번쩍임 등 걸러냄)
   const items = itemConfirmer.update(b.items, performance.now());
   const counts = readCounters(frame);
