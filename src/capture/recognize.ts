@@ -54,9 +54,14 @@ function isPurple([r, g, b]: RGB): boolean {
   return r > 120 && r < 230 && b > 170 && g < 140;
 }
 
-/** 점 찍기 아이콘의 진한 남색 테두리 / 형광 하늘색 고리 (빨강 성분이 거의 없다) */
-function isDotIcon([r, g, b]: RGB): boolean {
-  return r < 50 && b > 110 && (g > 170 || g < 110);
+/** 점 찍기 아이콘의 진한 남색 테두리 */
+function isDotNavy([r, g, b]: RGB): boolean {
+  return r < 60 && g < 110 && b > 100;
+}
+
+/** 점 찍기 아이콘의 형광 하늘색 고리 */
+function isDotCyan([r, g, b]: RGB): boolean {
+  return r < 60 && g > 170 && b > 200;
 }
 
 export interface CellRead {
@@ -77,10 +82,17 @@ function cellPatch(f: Frame, board: Rect, r: number, c: number, x0: number, y0: 
 /** 칸 중앙의 아이템 아이콘. 아이콘은 블록 위에도 계속 보인다. */
 export function detectItem(px: RGB[]): Item['type'] | null {
   if (px.length === 0) return null;
-  if (px.filter(isDotIcon).length / px.length > 0.08) return 'dot';
+  // 점 찍기: 남색 테두리와 하늘색 고리가 함께 있어야 한다.
+  // (줄 제거 때의 번쩍임은 밝은 색 위주라 남색이 거의 없다)
+  const navy = px.filter(isDotNavy).length / px.length;
+  const cyan = px.filter(isDotCyan).length / px.length;
+  if (navy > 0.02 && cyan > 0.05) return 'dot';
   if (px.filter(isPurple).length / px.length > 0.06) return 'swap';
   return null;
 }
+
+/** 한 줄에서 이 개수 이상 아이템처럼 보이면 아이템이 아니라 줄 제거 이펙트로 본다 */
+export const EFFECT_ROW_ITEMS = 3;
 
 /** 픽셀 하나를 블록 색 / 빈칸 / 기타(아이콘·광택 등)로 분류 */
 /**
@@ -136,12 +148,15 @@ export function readBoard(f: Frame, board: Rect): BoardRead {
   const colors: (string | null)[][] = [];
   for (let r = 0; r < H; r++) {
     colors.push([]);
+    const rowItems: Item[] = [];
     for (let c = 0; c < W; c++) {
       const cell = readCell(f, board, r, c);
       if (cell.filled) rows[r] |= 1 << c;
-      if (cell.item) items.push({ r, c, type: cell.item });
+      if (cell.item) rowItems.push({ r, c, type: cell.item });
       colors[r].push(cell.color);
     }
+    // 아이템은 한 칸씩 떨어진다. 한 줄 여러 칸이 동시에 아이템처럼 보이면 줄 제거 이펙트다.
+    if (rowItems.length < EFFECT_ROW_ITEMS) items.push(...rowItems);
   }
   return { rows, items, colors };
 }

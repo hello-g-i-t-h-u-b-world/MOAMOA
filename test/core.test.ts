@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { emptyRows, place, rowsFromStrings, rowsToStrings } from '../src/core/board';
 import { PIECES, PIECE_TYPES, transformSteps } from '../src/core/pieces';
 import { solve } from '../src/core/search';
-import { receivedNewBlocks, track } from '../src/capture/tracker';
+import { ItemConfirmer, receivedNewBlocks, track } from '../src/capture/tracker';
 
 describe('블록 정의', () => {
   it('19종, 칸 수가 게임 표기와 같다', () => {
@@ -118,5 +118,28 @@ describe('추천 고정 해제 조건', () => {
   });
   it('바꿔 뽑기로 종류가 바뀌면 해제', () => {
     expect(receivedNewBlocks(snap([['ㅣ', false], [null, true], ['ㅎ', false]]), snap([['ㅣ', false], [null, true], ['ㅏ', false]]))).toBe(true);
+  });
+});
+
+describe('아이템 확인 (깜빡 나타나는 이펙트 거르기)', () => {
+  const dot = { r: 3, c: 4, type: 'dot' as const };
+  it('0.5초만 보이고 사라지면 인정하지 않는다', () => {
+    const ic = new ItemConfirmer();
+    for (let t = 0; t <= 500; t += 250) expect(ic.update([dot], t)).toEqual([]);
+    expect(ic.update([], 750)).toEqual([]);
+    expect(ic.update([], 1500)).toEqual([]);
+  });
+  it('1초 이상 계속 보이면 인정', () => {
+    const ic = new ItemConfirmer();
+    let out: unknown[] = [];
+    for (let t = 0; t <= 1000; t += 250) out = ic.update([dot], t);
+    expect(out).toEqual([dot]);
+  });
+  it('잠깐 한 프레임 놓쳐도 유지', () => {
+    const ic = new ItemConfirmer();
+    for (let t = 0; t <= 1000; t += 250) ic.update([dot], t);
+    expect(ic.update([], 1250)).toEqual([dot]);
+    expect(ic.update([dot], 1500)).toEqual([dot]);
+    expect(ic.update([], 2500)).toEqual([]); // 오래 안 보이면 제거
   });
 });

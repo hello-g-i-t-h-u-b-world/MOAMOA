@@ -26,7 +26,7 @@ import {
   type Frame,
   type Rect,
 } from '../capture/recognize';
-import { receivedNewBlocks, track, type Snapshot } from '../capture/tracker';
+import { ItemConfirmer, receivedNewBlocks, track, type Snapshot } from '../capture/tracker';
 
 // ───────────── 상태 ─────────────
 
@@ -542,6 +542,7 @@ type Source = { grab(): (Frame & { image: CanvasImageSource }) | null };
 const capture = new ScreenCapture();
 let source: Source | null = null;
 let prevSnap: Snapshot | null = null;
+const itemConfirmer = new ItemConfirmer();
 let lastSig = '';
 let stable = 0;
 let appliedSig = '';
@@ -558,12 +559,14 @@ function tick() {
   if (!calibReady() || state.paused) return;
 
   const b = readBoard(frame, state.calib.board!);
+  // 1초 이상 같은 자리에 보인 아이템만 인정 (줄 제거 번쩍임 등 걸러냄)
+  const items = itemConfirmer.update(b.items, performance.now());
   const slots = state.calib.slots.map((r) => readHandSlot(frame, r!));
   const counts = readCounters(frame);
   const sig =
     b.rows.join(',') +
     '|' +
-    b.items.map((it) => `${it.r}.${it.c}.${it.type}`).join(',') +
+    items.map((it) => `${it.r}.${it.c}.${it.type}`).join(',') +
     '|' +
     slots.map((s) => (s.used ? 'U' : `${s.type ?? '?'}${s.orient}`)).join(',') +
     '|' +
@@ -573,13 +576,13 @@ function tick() {
     lastSig = sig;
     stable = 0;
   }
-  // 애니메이션 중 오인식을 피하려고 같은 결과가 연속 2번 나와야 반영
-  if (stable < 1 || sig === appliedSig) return;
+  // 애니메이션(줄 제거 등) 중 오인식을 피하려고 같은 결과가 연속 3번(약 0.5초) 나와야 반영
+  if (stable < 2 || sig === appliedSig) return;
   appliedSig = sig;
 
   const snap: Snapshot = {
     rows: b.rows,
-    items: b.items,
+    items,
     hand: slots.map((s) => ({ type: s.type, used: s.used })),
   };
   const res = track(prevSnap, snap, live.items, state.inventory);
@@ -661,6 +664,7 @@ $('btnCapture').onclick = async () => {
     await capture.start();
     source = capture;
     prevSnap = null;
+    itemConfirmer.reset();
     appliedSig = '';
     $('btnCapture').textContent = '화면 공유 중지';
     addLog('화면 공유 시작');
@@ -688,6 +692,7 @@ $<HTMLInputElement>('fileInput').onchange = async (e) => {
   if (capture.active) capture.stop();
   source = { grab: () => ({ data: img.data, width: img.width, height: img.height, image: cv }) };
   prevSnap = null;
+  itemConfirmer.reset();
   appliedSig = '';
   addLog(`이미지 열기: ${file.name} (${img.width}×${img.height})`);
   if (!calibReady()) openCalib();
@@ -711,6 +716,7 @@ $('btnReset').onclick = () => {
   live.items = [];
   live.hand = [];
   prevSnap = null;
+  itemConfirmer.reset();
   appliedSig = '';
   requestSolve();
 };

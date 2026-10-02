@@ -97,3 +97,38 @@ export function receivedNewBlocks(prev: Snapshot, cur: Snapshot): boolean {
     return p.used || p.type !== s.type;
   });
 }
+
+/**
+ * 새로 보인 아이템은 일정 시간 같은 자리에 계속 보여야 인정한다.
+ * 줄 제거 번쩍임처럼 잠깐 나타났다 사라지는 것을 걸러낸다.
+ */
+export class ItemConfirmer {
+  private seen = new Map<string, { item: Item; since: number; last: number }>();
+
+  constructor(
+    /** 인정까지 계속 보여야 하는 시간 */
+    private readonly holdMs = 1000,
+    /** 이 시간 안의 잠깐 끊김은 연속으로 본다 (아이콘 반짝임) */
+    private readonly gapMs = 600,
+  ) {}
+
+  /** 이번 프레임에 감지된 아이템을 넣고, 인정된 아이템 목록을 받는다 */
+  update(detected: readonly Item[], now: number): Item[] {
+    for (const it of detected) {
+      const key = `${it.r},${it.c},${it.type}`;
+      const prev = this.seen.get(key);
+      if (prev && now - prev.last <= this.gapMs) prev.last = now;
+      else this.seen.set(key, { item: it, since: now, last: now });
+    }
+    const out: Item[] = [];
+    for (const [key, e] of this.seen) {
+      if (now - e.last > this.gapMs) this.seen.delete(key);
+      else if (e.last - e.since >= this.holdMs) out.push(e.item);
+    }
+    return out.sort((a, b) => a.r - b.r || a.c - b.c);
+  }
+
+  reset(): void {
+    this.seen.clear();
+  }
+}
