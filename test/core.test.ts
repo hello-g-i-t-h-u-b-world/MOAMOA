@@ -135,6 +135,13 @@ describe('아이템 확인 (깜빡 나타나는 이펙트 거르기)', () => {
     for (let t = 0; t <= 1000; t += 250) out = ic.update([dot], t);
     expect(out).toEqual([dot]);
   });
+  it('화면을 보지 않은 시간(조각 선택 중)만큼 미루면 아이템이 유지된다', () => {
+    const ic = new ItemConfirmer();
+    for (let t = 0; t <= 1000; t += 250) ic.update([dot], t);
+    // 1000ms에 선택 시작, 4000ms에 선택 끝
+    ic.shift(3000);
+    expect(ic.update([dot], 4250)).toEqual([dot]);
+  });
   it('잠깐 한 프레임 놓쳐도 유지', () => {
     const ic = new ItemConfirmer();
     for (let t = 0; t <= 1000; t += 250) ic.update([dot], t);

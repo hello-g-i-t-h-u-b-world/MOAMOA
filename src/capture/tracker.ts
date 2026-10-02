@@ -131,6 +131,14 @@ export class ItemConfirmer {
   reset(): void {
     this.seen.clear();
   }
+
+  /** 화면을 보지 않은 시간(조각 선택 중 등)만큼 기록을 미뤄, 그동안 아이템이 사라진 것으로 보지 않게 한다 */
+  shift(ms: number): void {
+    for (const e of this.seen.values()) {
+      e.since += ms;
+      e.last += ms;
+    }
+  }
 }
 
 /**
@@ -195,6 +203,11 @@ export class BoardFilter {
   reset(): void {
     this.stable = null;
     this.since.clear();
+  }
+
+  /** 화면을 보지 않은 시간만큼 대기 중인 칸의 시작 시각을 미룬다 */
+  shift(ms: number): void {
+    for (const [k, t] of this.since) this.since.set(k, t + ms);
   }
 }
 

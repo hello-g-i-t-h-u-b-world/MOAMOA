@@ -4,6 +4,8 @@ import { analyzeSwaps, solve, type Plan, type SolveInput, type SwapAdvice } from
 export interface SolveRequest {
   id: number;
   input: SolveInput;
+  /** 계획은 그대로 두고 바꿔 뽑기 분석만 (추천 고정 중 바꿔 뽑기 개수가 바뀐 경우) */
+  swapsOnly?: boolean;
 }
 
 export type SolveResponse =
@@ -13,8 +15,13 @@ export type SolveResponse =
 let latest = 0;
 
 self.onmessage = (e: MessageEvent<SolveRequest>) => {
-  const { id, input } = e.data;
+  const { id, input, swapsOnly } = e.data;
   latest = id;
+  if (swapsOnly) {
+    const t1 = performance.now();
+    self.postMessage({ id, kind: 'swaps', swaps: analyzeSwaps(input), ms: performance.now() - t1 } satisfies SolveResponse);
+    return;
+  }
   const t0 = performance.now();
   const plan = solve(input);
   self.postMessage({ id, kind: 'plan', plan, ms: performance.now() - t0 } satisfies SolveResponse);

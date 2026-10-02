@@ -16,6 +16,7 @@ import { DEFAULT_WEIGHTS } from '../core/eval';
 import type { Move, Plan, SolveInput, SwapAdvice } from '../core/search';
 import type { SolveRequest, SolveResponse } from '../core/solver.worker';
 import { ScreenCapture } from '../capture/capture';
+import { learnedOnly, makeExport } from '../capture/digit-data';
 import {
   DEFAULT_DIGITS,
   matchDigit,
@@ -135,7 +136,31 @@ function learnDigit(sig: DigitSig, value: number) {
   }
 }
 
-/** 학습한 숫자를 지우고 기본 템플릿(0)만 남긴다 */
+/** 파일 내려받기 */
+function downloadJson(data: unknown, name: string) {
+  const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+function timestamp(): string {
+  const t = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${t.getFullYear()}${pad(t.getMonth() + 1)}${pad(t.getDate())}-${pad(t.getHours())}${pad(t.getMinutes())}${pad(t.getSeconds())}`;
+}
+
+/** 학습한 숫자(기본 내장 제외)를 파일로 내보낸다 */
+function exportDigits() {
+  const data = makeExport(state.digits, DEFAULT_DIGITS);
+  const name = `moamoa-digits-${timestamp()}.json`;
+  downloadJson(data, name);
+  addLog(`학습 데이터 내보내기: 숫자 ${Object.keys(data.digits).sort().join(', ')} (${name})`);
+}
+
+/** 학습한 숫자를 지우고 기본 템플릿만 남긴다 */
 function resetDigits() {
   state.digits = structuredClone(DEFAULT_DIGITS);
   try {
@@ -209,12 +234,47 @@ function requestSolve(fromScreen = false) {
     return;
   }
   setStatus('계산 중…', 'busy');
-  worker.postMessage({ id: ++reqId, input } satisfies SolveRequest);
+  const id = ++reqId;
+  planReqId = id;
+  swapReqId = id;
+  worker.postMessage({ id, input } satisfies SolveRequest);
+}
+
+let planReqId = 0;
+let swapReqId = 0;
+
+/**
+ * 계획은 그대로 두고 바꿔 뽑기 분석만 다시 한다 (추천 고정 중 바꿔 뽑기를 얻은 경우 등).
+ * 화면 공유 중이면 지금 화면(놓고 남은 조각) 기준으로 분석한다.
+ */
+function requestSwapAnalysis() {
+  state.swaps = null;
+  if (!state.plan || state.inventory.swap <= 0) {
+    renderSwapAdvice();
+    renderHand();
+    return;
+  }
+  const src = source && live.hand.length ? live : state;
+  const effort = EFFORT[($('effort') as HTMLSelectElement).value as keyof typeof EFFORT];
+  const input: SolveInput = {
+    rows: withoutFullRows(src.rows),
+    hand: src.hand.map((s) => (s.used ? null : s.type)),
+    items: src.items.slice(),
+    inventory: { ...state.inventory },
+    weights: DEFAULT_WEIGHTS,
+    maxDots: 2,
+    ...effort,
+  };
+  if (input.hand.every((h) => h === null)) return;
+  const id = ++reqId;
+  swapReqId = id;
+  renderSwapAdvice();
+  worker.postMessage({ id, input, swapsOnly: true } satisfies SolveRequest);
 }
 
 worker.onmessage = (e: MessageEvent<SolveResponse>) => {
   const res = e.data;
-  if (res.id !== reqId) return;
+  if (res.id !== (res.kind === 'plan' ? planReqId : swapReqId)) return;
   if (res.kind === 'plan') {
     state.plan = res.plan;
     state.solveMs = res.ms;
@@ -425,7 +485,8 @@ function renderHand() {
   wrap.innerHTML = '';
   state.hand.forEach((s, i) => {
     const card = document.createElement('div');
-    card.className = `slot ${s.used ? 'used' : ''}`;
+    const swapTarget = swapRecommendation()?.top.slot === i && !s.used;
+    card.className = `slot ${s.used ? 'used' : ''} ${swapTarget ? 'swap-target' : ''}`;
     const title = document.createElement('div');
     title.className = `slot-title num-${i}`;
     title.textContent = `${i + 1}번`;
@@ -533,33 +594,72 @@ function renderInventory() {
     row.className = 'digit-learned';
     const text = document.createElement('span');
     text.className = 'muted';
-    text.textContent = `학습한 숫자: ${learned.length ? learned.join(', ') : '없음'} (0은 기본 내장)`;
+    const builtin = Object.keys(DEFAULT_DIGITS).sort().join(', ');
+    text.textContent = `학습한 숫자: ${learned.length ? learned.join(', ') : '없음'} (기본 내장: ${builtin})`;
+    const exp = document.createElement('button');
+    exp.textContent = '학습 데이터 내보내기';
+    exp.title = '학습한 숫자를 파일로 저장합니다. 이 파일을 보내주면 모든 사용자의 기본값에 넣을 수 있습니다.';
+    exp.disabled = learned.length === 0;
+    exp.onclick = exportDigits;
     const reset = document.createElement('button');
     reset.textContent = '숫자 학습 초기화';
     reset.disabled = learned.length === 0;
     reset.onclick = () => {
-      if (confirm('학습한 숫자를 모두 지울까요? 기본 내장된 0만 남습니다.')) resetDigits();
+      if (confirm('학습한 숫자를 모두 지울까요? 기본 내장된 숫자만 남습니다.')) resetDigits();
     };
-    row.append(text, reset);
+    const btns = document.createElement('div');
+    btns.className = 'digit-learned-btns';
+    btns.append(exp, reset);
+    row.append(text, btns);
     wrap.appendChild(row);
   }
 }
 
+/** 바꿔 뽑기를 추천하는가 (손패를 다 못 놓으면 무조건, 아니면 기대 이득이 비용보다 클 때) */
+function swapRecommendation(): { top: SwapAdvice; urgent: boolean } | null {
+  if (state.inventory.swap <= 0 || !state.plan || !state.swaps?.length) return null;
+  const top = state.swaps[0];
+  const urgent = !state.plan.complete;
+  if (!urgent && top.gain < DEFAULT_WEIGHTS.swapCost) return null;
+  return { top, urgent };
+}
+
+let lastSwapLogKey = '';
+
 function renderSwapAdvice() {
   const el = $('swapAdvice');
+  const banner = $('swapBanner');
   el.innerHTML = '';
+  banner.hidden = true;
+  banner.innerHTML = '';
   if (state.inventory.swap <= 0 || !state.plan) return;
   if (!state.swaps) {
     el.innerHTML = '<p class="muted">바꿔 뽑기 분석 중…</p>';
     return;
   }
-  const top = state.swaps[0];
-  if (!top) return;
-  const recommend = !state.plan.complete || top.gain >= DEFAULT_WEIGHTS.swapCost;
-  el.innerHTML = recommend
-    ? `<p class="go">⇄ <b>바꿔 뽑기 추천: ${top.slot + 1}번 조각 (${top.type})</b><br/>
-       <span class="muted">기대 이득 +${top.gain.toFixed(1)} · 교체 후 전부 놓을 확률 ${(top.completeRate * 100).toFixed(0)}%</span></p>`
-    : `<p class="muted">바꿔 뽑기는 아껴두세요 (최대 기대 이득 ${top.gain.toFixed(1)}: ${top.slot + 1}번 ${top.type})</p>`;
+  const rec = swapRecommendation();
+  if (!rec) {
+    const top = state.swaps[0];
+    if (top) el.innerHTML = `<p class="muted">바꿔 뽑기는 아껴두세요 (최대 기대 이득 ${top.gain.toFixed(1)}: ${top.slot + 1}번 ${top.type})</p>`;
+    return;
+  }
+  const { top, urgent } = rec;
+  const pct = (top.completeRate * 100).toFixed(0);
+  banner.hidden = false;
+  banner.classList.toggle('urgent', urgent);
+  banner.innerHTML = `
+    <div class="swap-banner-icon">⇄</div>
+    <div>
+      <div class="swap-banner-title">${urgent ? '⚠ 이대로는 블록을 다 놓을 수 없어요' : '바꿔 뽑기를 먼저 쓰세요!'}</div>
+      <div class="swap-banner-body"><b class="num-${top.slot}">${top.slot + 1}번 조각 (${top.type})</b>을 바꿔 뽑기로 교체하세요</div>
+      <div class="swap-banner-sub">${urgent ? '' : `기대 이득 +${top.gain.toFixed(1)} · `}교체 후 전부 놓을 확률 ${pct}%</div>
+    </div>`;
+  el.innerHTML = `<p class="go">⇄ <b>${top.slot + 1}번 조각 (${top.type})</b> 교체 추천 (위 안내 참고)</p>`;
+  const key = `${swapReqId}:${top.slot}`;
+  if (key !== lastSwapLogKey) {
+    lastSwapLogKey = key;
+    addLog(`⇄ 바꿔 뽑기 추천: ${top.slot + 1}번 조각 (${top.type})${urgent ? ' — 이대로는 다 못 놓음' : ''}`);
+  }
 }
 
 function renderLog() {
@@ -610,6 +710,8 @@ function tick() {
   if (!calibReady() || state.paused) return;
   if (!checkFrameSize(frame)) return;
   const now = performance.now();
+  // 보유 능력 개수는 보드·손패와 상관없이 매 순간 읽어 바로 반영한다
+  updateCounters(frame, now);
 
   const slots = state.calib.slots.map((r) => readHandSlot(frame, r!));
   // 게임에서 조각을 클릭해 선택(노란 카드)한 동안에는 화면을 반영하지도, 계산하지도 않는다.
@@ -634,21 +736,13 @@ function tick() {
       } else lastColors[r][c] = null;
   // 1초 이상 같은 자리에 보인 아이템만 인정 (줄 제거 번쩍임 등 걸러냄)
   const items = itemConfirmer.update(b.items, now);
-  // 보유 능력 숫자: 같은 값이 0.6초 이어져야 바꾸고, 안 보이면 마지막 값 유지
-  const countReads = readCounters(frame);
-  const counts = {
-    dot: countSmoothers.dot.update(countReads.dot, now),
-    swap: countSmoothers.swap.update(countReads.swap, now),
-  };
   recordFrame(frame, now, { selected: false, hand: slots, raw: rawRows, rows: b.rows, items });
   const sig =
     b.rows.join(',') +
     '|' +
     items.map((it) => `${it.r}.${it.c}.${it.type}`).join(',') +
     '|' +
-    slots.map((s) => (s.used ? 'U' : `${s.type ?? '?'}${s.orient}`)).join(',') +
-    '|' +
-    ITEM_KEYS.map((k) => `${counts[k].value ?? '-'}${counts[k].unknownSig ? '?' : ''}`).join(',');
+    slots.map((s) => (s.used ? 'U' : `${s.type ?? '?'}${s.orient}`)).join(',');
   if (sig === lastSig) stable++;
   else {
     lastSig = sig;
@@ -683,15 +777,7 @@ function tick() {
   live.hand = slots.map((s) => ({ type: s.type, orient: s.orient, used: s.used, color: s.color }));
   state.inventory = res.inventory;
   // 화면에서 읽은 개수가 있으면 추적값보다 우선한다
-  for (const k of ITEM_KEYS) {
-    const c = counts[k];
-    state.countFromScreen[k] = c.value != null;
-    if (c.value != null) {
-      state.inventory[k] = c.value;
-      state.digitPrompt[k] = null;
-    }
-    if (c.unknownSig) state.digitPrompt[k] = { sig: c.unknownSig, url: cropUrl(frame, state.calib.counters[k]!) };
-  }
+  for (const k of ITEM_KEYS) if (state.countFromScreen[k] && countSmoothers[k].value != null) state.inventory[k] = countSmoothers[k].value!;
 
   // 추천 고정 중: 블록을 옮기는 동안에는 화면을 바꾸지 않는다 (보유 능력 개수만 갱신)
   if (state.locked && !newBlocks) {
@@ -700,6 +786,48 @@ function tick() {
   }
   applyLive();
   requestSolve(true);
+}
+
+/**
+ * 보유 능력 개수를 화면에서 읽어 바로 반영한다 (매 프레임).
+ * 같은 값이 0.6초 이어질 때만 바꾸고, 숫자가 안 보이면 마지막 값을 유지한다.
+ * - 추천 고정 중: 계획은 그대로, 바꿔 뽑기 개수가 바뀌면 바꿔 뽑기 분석만 다시 한다
+ * - 고정 아님: 개수가 바뀌면 다시 계산한다
+ */
+function updateCounters(frame: Frame & { image: CanvasImageSource }, now: number) {
+  const reads = readCounters(frame);
+  const changed: ItemKey[] = [];
+  let promptChanged = false;
+  for (const k of ITEM_KEYS) {
+    if (!state.calib.counters[k]) continue;
+    const c = countSmoothers[k].update(reads[k], now);
+    if (c.value != null) {
+      if (!state.countFromScreen[k] || state.inventory[k] !== c.value) {
+        if (state.countFromScreen[k]) addLog(`${k === 'dot' ? '⊙ 점 찍기' : '⇄ 바꿔 뽑기'} ${state.inventory[k]} → ${c.value}개`);
+        state.inventory[k] = c.value;
+        state.countFromScreen[k] = true;
+        changed.push(k);
+      }
+      if (state.digitPrompt[k]) {
+        state.digitPrompt[k] = null;
+        promptChanged = true;
+      }
+    }
+    if (c.unknownSig && state.digitPrompt[k]?.sig !== c.unknownSig) {
+      state.digitPrompt[k] = { sig: c.unknownSig, url: cropUrl(frame, state.calib.counters[k]!) };
+      promptChanged = true;
+    }
+  }
+  if (!changed.length && !promptChanged) return;
+  renderInventory();
+  if (!changed.length || !state.plan || selectionPaused) {
+    renderSwapAdvice();
+    return;
+  }
+  if (state.locked) {
+    if (changed.includes('swap')) requestSwapAnalysis();
+    else renderSwapAdvice();
+  } else requestSolve(!!source);
 }
 
 /** 보유 능력 숫자 읽기. 영역이 없거나 숫자가 안 보이면 null, 모르는 모양이면 value=null */
@@ -728,9 +856,12 @@ function cropUrl(frame: Frame & { image: CanvasImageSource }, r: Rect): string {
 // ───────────── 조각 선택 중 일시 정지 ─────────────
 
 
+let selectionPausedAt = 0;
+
 function enterSelectionPause() {
   if (selectionPaused) return;
   selectionPaused = true;
+  selectionPausedAt = performance.now();
   const el = $('status');
   statusBeforeSelection = { text: el.textContent ?? '', kind: el.dataset.kind ?? 'idle' };
   setStatus('✋ 조각 선택 중 · 계산 멈춤', 'idle');
@@ -739,6 +870,11 @@ function enterSelectionPause() {
 function leaveSelectionPause() {
   if (!selectionPaused) return;
   selectionPaused = false;
+  // 선택 중에는 보드를 보지 않았으므로, 아이템·칸 상태 기록을 그 시간만큼 미룬다
+  // (그러지 않으면 선택이 끝난 뒤 있던 아이템이 사라졌다 다시 나타난 '새 드롭'으로 보인다)
+  const paused = performance.now() - selectionPausedAt;
+  itemConfirmer.shift(paused);
+  boardFilter.shift(paused);
   // 선택 중에 쌓인 '같은 화면' 판정을 버리고 지금 화면부터 다시 안정 여부를 본다
   lastSig = '';
   stable = 0;
@@ -899,17 +1035,13 @@ function saveCapture() {
       plan: state.plan ? { complete: state.plan.complete, moves: state.plan.moves } : null,
     },
     log: state.log,
+    // 학습한 숫자도 함께 (scripts/merge-digits.ts로 기본값에 합칠 수 있음)
+    digits: learnedOnly(state.digits, DEFAULT_DIGITS),
     frames,
   };
-  const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  const t = new Date();
-  const pad = (n: number) => String(n).padStart(2, '0');
-  a.download = `moamoa-${t.getFullYear()}${pad(t.getMonth() + 1)}${pad(t.getDate())}-${pad(t.getHours())}${pad(t.getMinutes())}${pad(t.getSeconds())}.json`;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
-  addLog(`화면 저장: 최근 ${frames.length}장 (${a.download})`);
+  const name = `moamoa-${timestamp()}.json`;
+  downloadJson(data, name);
+  addLog(`화면 저장: 최근 ${frames.length}장 (${name})`);
 }
 
 setInterval(tick, 250);

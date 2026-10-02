@@ -563,3 +563,86 @@ button:disabled {
   border-radius: 99px;
   padding: 0 8px;
 }
+
+.digit-learned {
+  flex-wrap: wrap;
+}
+.digit-learned-btns {
+  display: flex;
+  gap: 4px;
+}
+
+/* 바꿔 뽑기 추천 배너 (게임의 바꿔 뽑기 버튼 색) */
+.swap-banner {
+  /* 화면 폭과 상관없이 보드 위에 가로로 길게 */
+  grid-column: 1 / -1;
+  justify-self: center;
+  width: min(100%, 760px);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #7b3cff, #c45cff);
+  color: #fff;
+  box-shadow: 0 0 0 2px #e5dbff, 0 6px 24px #9b5cff88;
+  animation: swap-pulse 1.4s ease-in-out infinite;
+}
+.swap-banner[hidden] {
+  display: none;
+}
+.swap-banner.urgent {
+  background: linear-gradient(135deg, #e03131, #9b3cff);
+  box-shadow: 0 0 0 2px #ffc9c9, 0 6px 24px #e0313188;
+}
+.swap-banner-icon {
+  font-size: 40px;
+  font-weight: 900;
+  line-height: 1;
+  flex: none;
+}
+.swap-banner-title {
+  font-size: 19px;
+  font-weight: 900;
+  letter-spacing: -0.3px;
+}
+.swap-banner-body {
+  font-size: 15px;
+  margin-top: 2px;
+}
+.swap-banner-body b {
+  background: #fff;
+  border-radius: 6px;
+  padding: 0 6px;
+}
+.swap-banner-sub {
+  font-size: 12px;
+  opacity: 0.85;
+  margin-top: 2px;
+}
+@keyframes swap-pulse {
+  50% {
+    transform: scale(1.015);
+    box-shadow: 0 0 0 3px #fff, 0 6px 32px #c45cffcc;
+  }
+}
+
+/* 바꿔 뽑기로 교체할 조각 카드 */
+.slot.swap-target {
+  position: relative;
+  outline: 3px solid #b197fc;
+  box-shadow: 0 0 16px #9b5cff;
+  animation: swap-pulse 1.4s ease-in-out infinite;
+}
+.slot.swap-target::after {
+  content: '⇄ 교체';
+  position: absolute;
+  top: -10px;
+  right: -6px;
+  background: #9b5cff;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+  border-radius: 99px;
+  padding: 1px 8px;
+}

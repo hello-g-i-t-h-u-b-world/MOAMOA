@@ -2,6 +2,7 @@
 // DOM에 의존하지 않는 순수 함수라 node 테스트에서도 쓸 수 있다.
 import { H, W, emptyRows, type Item, type Rows } from '../core/board';
 import { PIECES, PIECE_TYPES, normalize, type Cell, type PieceType } from '../core/pieces';
+import builtinDigits from './digits.json';
 
 export interface Rect {
   x: number;
@@ -443,10 +444,11 @@ export function readDigitSig(f: Frame, rect: Rect): DigitSig | null {
 /** 숫자 → 학습된 모양들 */
 export type DigitTemplates = Record<string, DigitSig[]>;
 
-/** 게임 스크린샷에서 얻은 기본 템플릿 */
-export const DEFAULT_DIGITS: DigitTemplates = {
-  '0': ['6|099990990099990099990099990099990099990099099990'],
-};
+/**
+ * 기본 내장 숫자 모양 (src/capture/digits.json).
+ * 사용자들이 학습시켜 보내준 데이터를 scripts/merge-digits.ts로 검사해 합친다.
+ */
+export const DEFAULT_DIGITS: DigitTemplates = builtinDigits;
 
 /** 두 숫자 모양이 '확실히 다른' 칸 수. 가로 칸 수가 다르면 무한대 */
 export function digitDistance(a: DigitSig, b: DigitSig): number {
