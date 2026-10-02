@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { emptyRows, place, rowsFromStrings, rowsToStrings } from '../src/core/board';
 import { PIECES, PIECE_TYPES, transformSteps } from '../src/core/pieces';
 import { solve } from '../src/core/search';
-import { BoardFilter, ItemConfirmer, receivedNewBlocks, track, withoutFullRows } from '../src/capture/tracker';
+import { BoardFilter, CountSmoother, ItemConfirmer, receivedNewBlocks, track, withoutFullRows } from '../src/capture/tracker';
 
 describe('블록 정의', () => {
   it('19종, 칸 수가 게임 표기와 같다', () => {
@@ -182,5 +182,30 @@ describe('보드 칸 필터 (순간적인 오인식 거르기)', () => {
       '..........',
       '#.........',
     ]);
+  });
+});
+
+describe('보유 능력 숫자 안정화', () => {
+  const r = (value: number | null, sig = 's') => ({ sig, value });
+  it('같은 값이 0.6초 이어져야 바꾼다 (잠깐 튀는 값 무시)', () => {
+    const c = new CountSmoother();
+    c.update(r(2), 0);
+    expect(c.update(r(2), 700).value).toBe(2);
+    expect(c.update(r(5), 900).value).toBe(2); // 한 번 튐
+    expect(c.update(r(2), 1100).value).toBe(2);
+    expect(c.update(r(3), 1300).value).toBe(2);
+    expect(c.update(r(3), 2000).value).toBe(3);
+  });
+  it('숫자가 안 보이면 마지막 값을 유지', () => {
+    const c = new CountSmoother();
+    c.update(r(4), 0);
+    c.update(r(4), 700);
+    expect(c.update(null, 900).value).toBe(4);
+  });
+  it('처음 보는 모양은 1.5초 계속될 때만 물어본다', () => {
+    const c = new CountSmoother();
+    expect(c.update(r(null, 'x'), 0).unknownSig).toBeNull();
+    expect(c.update(r(null, 'x'), 1000).unknownSig).toBeNull();
+    expect(c.update(r(null, 'x'), 1600).unknownSig).toBe('x');
   });
 });

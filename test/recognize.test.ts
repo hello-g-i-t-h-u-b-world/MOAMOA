@@ -83,7 +83,68 @@ describe('보유 능력 개수', () => {
     }
   });
   it('모르는 모양이면 null', () => {
-    expect(matchDigit('2:##/##/##/##/##/##/##/##', DEFAULT_DIGITS)).toBeNull();
+    expect(matchDigit('2|9999999999999999', DEFAULT_DIGITS)).toBeNull();
+    expect(matchDigit('6|' + '9'.repeat(48), DEFAULT_DIGITS)).toBeNull();
+  });
+
+  // 실제 동그라미 위에 픽셀 숫자를 그려 넣는다 (게임 0과 같은 스타일로 가정한 0~8)
+  const FONT: Record<string, string[]> = {
+    '0': ['.####.', '##..##', '##..##', '##..##', '##..##', '##..##', '##..##', '.####.'],
+    '1': ['..##', '.###', '####', '..##', '..##', '..##', '..##', '..##'],
+    '2': ['.####.', '##..##', '....##', '...##.', '..##..', '.##...', '##....', '######'],
+    '3': ['.####.', '##..##', '....##', '..###.', '....##', '....##', '##..##', '.####.'],
+    '4': ['...##.', '..###.', '.####.', '##.##.', '######', '...##.', '...##.', '...##.'],
+    '5': ['######', '##....', '#####.', '....##', '....##', '....##', '##..##', '.####.'],
+    '6': ['.####.', '##....', '##....', '#####.', '##..##', '##..##', '##..##', '.####.'],
+    '7': ['######', '....##', '...##.', '...##.', '..##..', '..##..', '.##...', '.##...'],
+    '8': ['.####.', '##..##', '##..##', '.####.', '##..##', '##..##', '##..##', '.####.'],
+  };
+  const withDigit = (d: string, color: [number, number, number] = [255, 230, 163]): Frame => {
+    const data = Uint8Array.from(f.data);
+    for (let y = 492; y < 504; y++)
+      for (let x = 398; x < 410; x++) data.set([39, 115, 203], (y * f.width + x) * 4);
+    const g = FONT[d];
+    g.forEach((row, r) => {
+      for (let c = 0; c < row.length; c++) if (row[c] === '#') data.set(color, ((494 + r) * f.width + 400 + 6 - g[0].length + c) * 4);
+    });
+    return { ...f, data };
+  };
+  const upscale = (src: Frame, s: number): Frame => {
+    const w = Math.round(src.width * s), h = Math.round(src.height * s);
+    const d = new Uint8Array(w * h * 4);
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++) {
+        const sx = Math.min(src.width - 1.001, Math.max(0, (x + 0.5) / s - 0.5));
+        const sy = Math.min(src.height - 1.001, Math.max(0, (y + 0.5) / s - 0.5));
+        const x0 = Math.floor(sx), y0 = Math.floor(sy), fx = sx - x0, fy = sy - y0;
+        for (let k = 0; k < 4; k++) {
+          const g = (xx: number, yy: number) => src.data[(yy * src.width + xx) * 4 + k];
+          d[(y * w + x) * 4 + k] = Math.round(g(x0, y0) * (1 - fx) * (1 - fy) + g(x0 + 1, y0) * fx * (1 - fy) + g(x0, y0 + 1) * (1 - fx) * fy + g(x0 + 1, y0 + 1) * fx * fy);
+        }
+      }
+    return { data: d, width: w, height: h };
+  };
+  const R = { x: 392, y: 486, w: 22, h: 22 };
+
+  it('1배에서 배운 0~8을 1·1.25·1.5·2배 화면에서도 정확히 읽고, 서로 헷갈리지 않는다', () => {
+    const tmpl: Record<string, string[]> = {};
+    for (const d of Object.keys(FONT)) tmpl[d] = [readDigitSig(withDigit(d), R)!];
+    for (const d of Object.keys(FONT))
+      for (const s of [1, 1.25, 1.5, 2]) {
+        const frame = s === 1 ? withDigit(d) : upscale(withDigit(d), s);
+        const sig = readDigitSig(frame, { x: R.x * s, y: R.y * s, w: R.w * s, h: R.h * s })!;
+        expect(matchDigit(sig, tmpl), `${d} ×${s}`).toBe(Number(d));
+      }
+  });
+
+  it('버튼이 밝아져 숫자가 더 하얗게 보여도 읽는다', () => {
+    expect(matchDigit(readDigitSig(withDigit('0', [255, 248, 215]), R)!, DEFAULT_DIGITS)).toBe(0);
+  });
+
+  it('영역 전체가 밝으면(버튼 강조) 숫자를 읽지 않는다', () => {
+    const data = Uint8Array.from(f.data);
+    for (let y = R.y; y < R.y + R.h; y++) for (let x = R.x; x < R.x + R.w; x++) data.set([255, 240, 170], (y * f.width + x) * 4);
+    expect(readDigitSig({ ...f, data }, R)).toBeNull();
   });
 });
 

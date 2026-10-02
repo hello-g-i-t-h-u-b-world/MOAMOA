@@ -202,3 +202,52 @@ export class BoardFilter {
 export function withoutFullRows(rows: Rows): Rows {
   return rows.map((row) => (row === FULL ? 0 : row));
 }
+
+/**
+ * 보유 능력 숫자 읽기 결과를 시간에 따라 안정화한다.
+ * - 새 값은 confirmMs 동안 같은 값으로 읽혀야 바꾼다 (버튼 애니메이션·마우스 올림 등으로 잠깐 튀는 값 무시)
+ * - 숫자가 안 보이면(null) 마지막 값을 유지한다
+ * - 처음 보는 모양은 unknownMs 동안 계속될 때만 사용자에게 물어본다
+ */
+export class CountSmoother {
+  value: number | null = null;
+  private cand: { v: number | '?'; since: number } | null = null;
+
+  constructor(
+    private readonly confirmMs = 600,
+    private readonly unknownMs = 1500,
+  ) {}
+
+  update(read: { sig: string; value: number | null } | null, now: number): { value: number | null; unknownSig: string | null } {
+    if (!read) {
+      this.cand = null;
+      return { value: this.value, unknownSig: null };
+    }
+    const v: number | '?' = read.value ?? '?';
+    if (v === this.value) {
+      this.cand = null;
+      return { value: this.value, unknownSig: null };
+    }
+    if (!this.cand || this.cand.v !== v) {
+      this.cand = { v, since: now };
+      return { value: this.value, unknownSig: null };
+    }
+    if (v === '?') return { value: this.value, unknownSig: now - this.cand.since >= this.unknownMs ? read.sig : null };
+    if (now - this.cand.since >= this.confirmMs) {
+      this.value = v;
+      this.cand = null;
+    }
+    return { value: this.value, unknownSig: null };
+  }
+
+  /** 사용자가 알려준 값으로 바로 확정 */
+  set(v: number): void {
+    this.value = v;
+    this.cand = null;
+  }
+
+  reset(): void {
+    this.value = null;
+    this.cand = null;
+  }
+}

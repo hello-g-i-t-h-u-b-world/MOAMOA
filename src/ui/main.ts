@@ -28,7 +28,7 @@ import {
   type Frame,
   type Rect,
 } from '../capture/recognize';
-import { BoardFilter, ItemConfirmer, receivedNewBlocks, track, withoutFullRows, type Snapshot } from '../capture/tracker';
+import { BoardFilter, CountSmoother, ItemConfirmer, receivedNewBlocks, track, withoutFullRows, type Snapshot } from '../capture/tracker';
 
 // ───────────── 상태 ─────────────
 
@@ -66,7 +66,10 @@ type ItemKey = 'dot' | 'swap';
 const ITEM_KEYS: ItemKey[] = ['dot', 'swap'];
 
 const CALIB_KEY = 'moamoa.calib.v1';
-const DIGITS_KEY = 'moamoa.digits.v1';
+const DIGITS_KEY = 'moamoa.digits.v2';
+/** 숫자 인식 방식이 바뀌기 전의 학습 데이터 (호환 안 됨) */
+const OLD_DIGITS_KEY = 'moamoa.digits.v1';
+let oldDigitsDropped = false;
 const EFFORT = {
   fast: { beam: 60, finalists: 30 },
   normal: { beam: 150, finalists: 60 },
@@ -110,6 +113,10 @@ function loadCalib(): Calib {
 function loadDigits(): DigitTemplates {
   const out: DigitTemplates = structuredClone(DEFAULT_DIGITS);
   try {
+    if (localStorage.getItem(OLD_DIGITS_KEY)) {
+      localStorage.removeItem(OLD_DIGITS_KEY);
+      oldDigitsDropped = true;
+    }
     const raw = localStorage.getItem(DIGITS_KEY);
     if (raw) for (const [d, sigs] of Object.entries(JSON.parse(raw) as DigitTemplates)) out[d] = [...new Set([...(out[d] ?? []), ...sigs])];
   } catch {
@@ -498,6 +505,7 @@ function renderInventory() {
         b.textContent = String(v);
         b.onclick = () => {
           learnDigit(prompt.sig, v);
+          countSmoothers[key].set(v);
           state.digitPrompt[key] = null;
           state.inventory[key] = v;
           state.countFromScreen[key] = true;
@@ -579,6 +587,7 @@ let lastFrame: (Frame & { image: CanvasImageSource }) | null = null;
 /** 칸별 마지막으로 읽은 블록 색 */
 const lastColors: (string | null)[][] = Array.from({ length: H }, () => new Array<string | null>(W).fill(null));
 const itemConfirmer = new ItemConfirmer();
+const countSmoothers: Record<ItemKey, CountSmoother> = { dot: new CountSmoother(), swap: new CountSmoother() };
 let lastSig = '';
 let stable = 0;
 let appliedSig = '';
@@ -625,7 +634,12 @@ function tick() {
       } else lastColors[r][c] = null;
   // 1초 이상 같은 자리에 보인 아이템만 인정 (줄 제거 번쩍임 등 걸러냄)
   const items = itemConfirmer.update(b.items, now);
-  const counts = readCounters(frame);
+  // 보유 능력 숫자: 같은 값이 0.6초 이어져야 바꾸고, 안 보이면 마지막 값 유지
+  const countReads = readCounters(frame);
+  const counts = {
+    dot: countSmoothers.dot.update(countReads.dot, now),
+    swap: countSmoothers.swap.update(countReads.swap, now),
+  };
   recordFrame(frame, now, { selected: false, hand: slots, raw: rawRows, rows: b.rows, items });
   const sig =
     b.rows.join(',') +
@@ -634,7 +648,7 @@ function tick() {
     '|' +
     slots.map((s) => (s.used ? 'U' : `${s.type ?? '?'}${s.orient}`)).join(',') +
     '|' +
-    ITEM_KEYS.map((k) => counts[k]?.sig ?? '-').join(',');
+    ITEM_KEYS.map((k) => `${counts[k].value ?? '-'}${counts[k].unknownSig ? '?' : ''}`).join(',');
   if (sig === lastSig) stable++;
   else {
     lastSig = sig;
@@ -671,11 +685,12 @@ function tick() {
   // 화면에서 읽은 개수가 있으면 추적값보다 우선한다
   for (const k of ITEM_KEYS) {
     const c = counts[k];
-    state.countFromScreen[k] = c?.value != null;
-    state.digitPrompt[k] = null;
-    if (!c) continue;
-    if (c.value != null) state.inventory[k] = c.value;
-    else state.digitPrompt[k] = { sig: c.sig, url: cropUrl(frame, state.calib.counters[k]!) };
+    state.countFromScreen[k] = c.value != null;
+    if (c.value != null) {
+      state.inventory[k] = c.value;
+      state.digitPrompt[k] = null;
+    }
+    if (c.unknownSig) state.digitPrompt[k] = { sig: c.unknownSig, url: cropUrl(frame, state.calib.counters[k]!) };
   }
 
   // 추천 고정 중: 블록을 옮기는 동안에는 화면을 바꾸지 않는다 (보유 능력 개수만 갱신)
@@ -758,6 +773,8 @@ function resetRecognition() {
   stable = 0;
   itemConfirmer.reset();
   boardFilter.reset();
+  countSmoothers.dot.reset();
+  countSmoothers.swap.reset();
   dropsPrimed = false;
 }
 
@@ -1248,3 +1265,4 @@ $('btnCalibDone').onclick = () => {
 
 renderAll();
 renderLog();
+if (oldDigitsDropped) addLog('숫자 인식 방식이 바뀌어 예전에 학습한 숫자를 지웠습니다. 처음 보는 숫자가 나오면 다시 알려주세요.');

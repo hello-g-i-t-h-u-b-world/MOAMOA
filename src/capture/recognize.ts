@@ -308,12 +308,21 @@ export function orientIndexOf(type: PieceType, cells: Cell[]): number {
 
 // ───────────── 보유 능력 개수 (버튼 오른쪽 동그라미 안의 노란 숫자) ─────────────
 
-/** 숫자 픽셀 (노란색) */
-function isDigitPixel([r, g, b]: RGB): boolean {
-  return r > 170 && g > 140 && b < 170 && r - b > 60;
+/**
+ * 숫자 픽셀일 정도 (0~1). 숫자는 연노랑/흰색이라 R·G가 모두 높고,
+ * 동그라미(파랑·보라)·버튼 배경·버튼 글자는 R 또는 G가 낮다. 경계의 섞인 색은 중간 값이 된다.
+ */
+function digitWeight([r, g]: RGB): number {
+  return Math.max(0, Math.min(1, (Math.min(r, g) - 130) / 80));
 }
 
-/** 픽셀 폰트 숫자 모양. 숫자 높이를 8칸으로 보고 칸 단위로 샘플링한다. 예: "6:.####./##..##/…" */
+const DIGIT_ROWS = 8;
+
+/**
+ * 숫자 모양 특징. "가로 칸 수|칸별 채움 정도(0~9)" 형식.
+ * 게임 숫자는 높이 8칸짜리 픽셀 폰트라, 숫자를 감싸는 영역을 폰트 칸 단위로 나눠
+ * 칸마다 숫자 픽셀이 덮는 비율을 잰다. 화면 배율·위치가 조금 달라도 같은 숫자는 거의 같은 값이 나온다.
+ */
 export type DigitSig = string;
 
 export function readDigitSig(f: Frame, rect: Rect): DigitSig | null {
@@ -321,41 +330,114 @@ export function readDigitSig(f: Frame, rect: Rect): DigitSig | null {
   const y0 = Math.max(0, Math.round(rect.y));
   const x1 = Math.min(f.width, Math.round(rect.x + rect.w));
   const y1 = Math.min(f.height, Math.round(rect.y + rect.h));
-  let bx0 = Infinity;
-  let by0 = Infinity;
-  let bx1 = -1;
-  let by1 = -1;
-  for (let y = y0; y < y1; y++)
-    for (let x = x0; x < x1; x++)
-      if (isDigitPixel(pixel(f, x, y))) {
-        bx0 = Math.min(bx0, x);
-        by0 = Math.min(by0, y);
-        bx1 = Math.max(bx1, x + 1);
-        by1 = Math.max(by1, y + 1);
+  const w = x1 - x0;
+  const h = y1 - y0;
+  if (w <= 0 || h <= 0) return null;
+  const rough = new Float32Array(w * h);
+  let strong = 0;
+  let rx0 = w, ry0 = h, rx1 = -1, ry1 = -1;
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++) {
+      const v = digitWeight(pixel(f, x0 + x, y0 + y));
+      rough[y * w + x] = v;
+      if (v >= 0.5) {
+        strong++;
+        rx0 = Math.min(rx0, x);
+        ry0 = Math.min(ry0, y);
+        rx1 = Math.max(rx1, x);
+        ry1 = Math.max(ry1, y);
       }
-  if (bx1 < 0 || by1 - by0 < 4) return null;
-  const unit = (by1 - by0) / 8;
-  const cols = Math.max(1, Math.round((bx1 - bx0) / unit));
-  const ux = (bx1 - bx0) / cols;
-  const rows: string[] = [];
-  for (let r = 0; r < 8; r++) {
-    let s = '';
-    for (let c = 0; c < cols; c++) {
-      const cx = bx0 + (c + 0.5) * ux;
-      const cy = by0 + (r + 0.5) * unit;
-      // 픽셀 x는 [x, x+1) 구간이므로 floor로 해당 픽셀을 고른다
-      let on = 0;
-      let n = 0;
-      for (let y = Math.floor(cy - unit * 0.3); y <= Math.floor(cy + unit * 0.3); y++)
-        for (let x = Math.floor(cx - ux * 0.3); x <= Math.floor(cx + ux * 0.3); x++) {
-          n++;
-          if (isDigitPixel(pixel(f, x, y))) on++;
-        }
-      s += on * 2 > n ? '#' : '.';
     }
-    rows.push(s);
-  }
-  return `${cols}:${rows.join('/')}`;
+  // 영역 대부분이 밝으면 숫자가 아니라 버튼이 빛나거나 선택된 상태 → 읽지 않음
+  if (strong === 0 || strong > w * h * 0.5) return null;
+
+  // 숫자 가장자리 픽셀은 숫자색과 동그라미색이 섞여 있다. 두 색 사이 어디쯤인지로
+  // '숫자가 덮은 비율'을 구하면 배율과 상관없이 비례한다.
+  const bgPx: RGB[] = [];
+  const fgPx: RGB[] = [];
+  for (let y = Math.max(0, ry0 - 2); y <= Math.min(h - 1, ry1 + 2); y++)
+    for (let x = Math.max(0, rx0 - 2); x <= Math.min(w - 1, rx1 + 2); x++) {
+      const v = rough[y * w + x];
+      if (v < 0.02) bgPx.push(pixel(f, x0 + x, y0 + y));
+      else if (v >= 0.9) fgPx.push(pixel(f, x0 + x, y0 + y));
+    }
+  const bg = bgPx.length ? median(bgPx) : ([39, 115, 203] as RGB);
+  const fg = fgPx.length ? median(fgPx) : ([255, 230, 163] as RGB);
+  const dv = [fg[0] - bg[0], fg[1] - bg[1], fg[2] - bg[2]];
+  const dd = dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2] || 1;
+  const weight = new Float32Array(w * h);
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++) {
+      // 숫자 후보 근처가 아니면 0 (버튼 글자·다른 영역 제외)
+      if (rough[y * w + x] <= 0 && (x < rx0 - 1 || x > rx1 + 1 || y < ry0 - 1 || y > ry1 + 1)) continue;
+      const p = pixel(f, x0 + x, y0 + y);
+      const a = ((p[0] - bg[0]) * dv[0] + (p[1] - bg[1]) * dv[1] + (p[2] - bg[2]) * dv[2]) / dd;
+      weight[y * w + x] = Math.max(0, Math.min(1, a));
+    }
+
+  // 열/행마다 가장 진한 값. 숫자 가장자리 픽셀은 배경과 섞여 '덮인 비율'만큼 옅어진다.
+  const colMax = new Float32Array(w);
+  const rowMax = new Float32Array(h);
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++) {
+      const v = weight[y * w + x];
+      if (v > colMax[x]) colMax[x] = v;
+      if (v > rowMax[y]) rowMax[y] = v;
+    }
+  // 가장 긴 연속 구간 = 숫자 (1픽셀 끊김은 허용, 주변의 작은 반짝임 무시)
+  const run = (prof: Float32Array): [number, number] | null => {
+    let best: [number, number] | null = null;
+    let start = -1;
+    let last = -1;
+    for (let i = 0; i <= prof.length; i++) {
+      const on = i < prof.length && prof[i] >= 0.15;
+      if (on) {
+        if (start < 0) start = i;
+        last = i;
+      } else if (start >= 0 && (i === prof.length || i - last > 1)) {
+        if (!best || last + 1 - start > best[1] - best[0]) best = [start, last + 1];
+        start = -1;
+      }
+    }
+    return best;
+  };
+  const xs = run(colMax);
+  const ys = run(rowMax);
+  if (!xs || !ys) return null;
+  // 가장자리를 픽셀보다 세밀하게: 가장자리 픽셀이 덮인 비율만큼만 숫자 영역에 넣는다
+  const bx0 = xs[0] + 1 - colMax[xs[0]];
+  const bx1 = xs[1] - 1 + colMax[xs[1] - 1];
+  const by0 = ys[0] + 1 - rowMax[ys[0]];
+  const by1 = ys[1] - 1 + rowMax[ys[1] - 1];
+  const bw = bx1 - bx0;
+  const bh = by1 - by0;
+  if (bh < 4 || bw <= 0) return null;
+  // 픽셀 폰트 한 칸 = 숫자 높이의 1/8. 칸마다 실제로 덮는 면적만큼 가중 평균한다 (배율이 달라도 같은 값)
+  const unit = bh / DIGIT_ROWS;
+  const cols = Math.max(1, Math.round(bw / unit));
+  const ux = bw / cols;
+  let levels = '';
+  for (let r = 0; r < DIGIT_ROWS; r++)
+    for (let c = 0; c < cols; c++) {
+      const cx0 = bx0 + c * ux;
+      const cx1 = cx0 + ux;
+      const cy0 = by0 + r * unit;
+      const cy1 = cy0 + unit;
+      let sum = 0;
+      let area = 0;
+      for (let y = Math.floor(cy0); y < Math.ceil(cy1); y++) {
+        const oy = Math.min(cy1, y + 1) - Math.max(cy0, y);
+        if (oy <= 0 || y < 0 || y >= h) continue;
+        for (let x = Math.floor(cx0); x < Math.ceil(cx1); x++) {
+          const ox = Math.min(cx1, x + 1) - Math.max(cx0, x);
+          if (ox <= 0 || x < 0 || x >= w) continue;
+          sum += weight[y * w + x] * ox * oy;
+          area += ox * oy;
+        }
+      }
+      levels += Math.min(9, Math.round((area ? sum / area : 0) * 9));
+    }
+  return `${cols}|${levels}`;
 }
 
 /** 숫자 → 학습된 모양들 */
@@ -363,25 +445,29 @@ export type DigitTemplates = Record<string, DigitSig[]>;
 
 /** 게임 스크린샷에서 얻은 기본 템플릿 */
 export const DEFAULT_DIGITS: DigitTemplates = {
-  '0': ['6:.####./##..##/##..##/##..##/##..##/##..##/##..##/.####.'],
+  '0': ['6|099990990099990099990099990099990099990099099990'],
 };
 
-function sigDistance(a: DigitSig, b: DigitSig): number {
-  const [ac, ab] = a.split(':');
-  const [bc, bb] = b.split(':');
-  if (ac !== bc || ab.length !== bb.length) return Infinity;
+/** 두 숫자 모양이 '확실히 다른' 칸 수. 가로 칸 수가 다르면 무한대 */
+export function digitDistance(a: DigitSig, b: DigitSig): number {
+  const [ac, al] = a.split('|');
+  const [bc, bl] = b.split('|');
+  if (!al || !bl || ac !== bc || al.length !== bl.length) return Infinity;
   let d = 0;
-  for (let i = 0; i < ab.length; i++) if (ab[i] !== bb[i]) d++;
+  for (let i = 0; i < al.length; i++) if (Math.abs(Number(al[i]) - Number(bl[i])) >= 5) d++;
   return d;
 }
 
-/** 가장 가까운 숫자. 충분히 비슷한 템플릿이 없으면 null */
-export function matchDigit(sig: DigitSig, templates: DigitTemplates, maxDist = 3): number | null {
+/**
+ * 가장 가까운 숫자. 차이 나는 칸이 maxDist 이하일 때만 인정한다.
+ * (예: 0과 8은 가운데 줄 4칸이 다르다)
+ */
+export function matchDigit(sig: DigitSig, templates: DigitTemplates, maxDist = 2): number | null {
   let best: number | null = null;
   let bestD = maxDist + 1;
   for (const [digit, sigs] of Object.entries(templates))
     for (const t of sigs) {
-      const d = sigDistance(sig, t);
+      const d = digitDistance(sig, t);
       if (d < bestD) {
         bestD = d;
         best = Number(digit);
