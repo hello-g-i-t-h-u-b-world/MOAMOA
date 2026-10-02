@@ -389,3 +389,81 @@ export function matchDigit(sig: DigitSig, templates: DigitTemplates, maxDist = 3
     }
   return best;
 }
+
+// ───────────── 보드 영역 자동 맞춤 ─────────────
+
+function lum([r, g, b]: RGB): number {
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+/** 한 축 방향 평균 밝기 (x축이면 열마다, y축이면 행마다 평균) */
+function brightnessProfile(f: Frame, rect: Rect, axis: 'x' | 'y', margin: number) {
+  const along0 = Math.max(0, Math.floor((axis === 'x' ? rect.x : rect.y) - margin));
+  const along1 = Math.min(axis === 'x' ? f.width : f.height, Math.ceil((axis === 'x' ? rect.x + rect.w : rect.y + rect.h) + margin));
+  // 직교 방향은 영역 안쪽 90%만 평균 (바깥 액자 영향 줄이기)
+  const across0 = Math.max(0, Math.round(axis === 'x' ? rect.y + rect.h * 0.05 : rect.x + rect.w * 0.05));
+  const across1 = Math.min(axis === 'x' ? f.height : f.width, Math.round(axis === 'x' ? rect.y + rect.h * 0.95 : rect.x + rect.w * 0.95));
+  const values = new Float64Array(Math.max(0, along1 - along0));
+  const step = Math.max(1, Math.floor((across1 - across0) / 200));
+  for (let a = along0; a < along1; a++) {
+    let sum = 0;
+    let n = 0;
+    for (let b = across0; b < across1; b += step) {
+      sum += lum(axis === 'x' ? pixel(f, a, b) : pixel(f, b, a));
+      n++;
+    }
+    values[a - along0] = n ? sum / n : 0;
+  }
+  return { start: along0, values };
+}
+
+/**
+ * 칸 사이 경계선은 칸 가운데보다 어둡다. 경계선 위치(pos + k·pitch)가 가장 어둡게 맞는 pos, pitch를 찾는다.
+ * pos는 사용자가 지정한 위치에서 반 칸 이내, pitch는 ±8% 이내에서 찾는다.
+ */
+function fitAxis(prof: { start: number; values: Float64Array }, pos0: number, len0: number, n: number) {
+  const P = (x: number) => {
+    const i = x - prof.start;
+    const i0 = Math.floor(i);
+    if (i0 < 0 || i0 + 1 >= prof.values.length) return NaN;
+    return prof.values[i0] * (1 - (i - i0)) + prof.values[i0 + 1] * (i - i0);
+  };
+  const score = (pos: number, pitch: number) => {
+    let s = 0;
+    for (let k = 1; k < n; k++) {
+      const x = pos + k * pitch;
+      const v = (P(x - pitch / 2) + P(x + pitch / 2)) / 2 - P(x);
+      if (Number.isNaN(v)) return -Infinity;
+      s += v;
+    }
+    return s;
+  };
+  const pitch0 = len0 / n;
+  let best = { pos: pos0, pitch: pitch0, score: score(pos0, pitch0) };
+  const base = best.score;
+  for (let pitch = pitch0 * 0.92; pitch <= pitch0 * 1.08; pitch += 0.02)
+    for (let pos = pos0 - pitch0 / 2; pos <= pos0 + pitch0 / 2; pos += 0.25) {
+      const s = score(pos, pitch);
+      if (s > best.score) best = { pos, pitch, score: s };
+    }
+  return { ...best, base };
+}
+
+export interface SnapResult {
+  rect: Rect;
+  /** 맞춤 전/후 경계선 대비 점수 (클수록 격자에 잘 맞음) */
+  before: number;
+  after: number;
+}
+
+/** 대충 지정한 보드 영역을 실제 격자선에 맞춘다 */
+export function snapBoardRect(f: Frame, rect: Rect): SnapResult {
+  const margin = Math.max(rect.w / W, rect.h / H);
+  const fx = fitAxis(brightnessProfile(f, rect, 'x', margin), rect.x, rect.w, W);
+  const fy = fitAxis(brightnessProfile(f, rect, 'y', margin), rect.y, rect.h, H);
+  return {
+    rect: { x: fx.pos, y: fy.pos, w: fx.pitch * W, h: fy.pitch * H },
+    before: fx.base + fy.base,
+    after: fx.score + fy.score,
+  };
+}

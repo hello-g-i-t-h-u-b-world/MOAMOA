@@ -388,7 +388,11 @@ button:disabled {
 }
 .targets {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
+}
+.targets button {
+  white-space: nowrap;
 }
 .calib-msg {
   color: var(--g3);

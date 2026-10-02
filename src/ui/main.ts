@@ -6,6 +6,7 @@ import {
   emptyRows,
   place,
   placeDot,
+  rowsToStrings,
   type Inventory,
   type Item,
   type Rows,
@@ -21,12 +22,13 @@ import {
   readBoard,
   readDigitSig,
   readHandSlot,
+  snapBoardRect,
   type DigitSig,
   type DigitTemplates,
   type Frame,
   type Rect,
 } from '../capture/recognize';
-import { ItemConfirmer, receivedNewBlocks, stabilizeRows, track, type Snapshot } from '../capture/tracker';
+import { BoardFilter, ItemConfirmer, receivedNewBlocks, track, withoutFullRows, type Snapshot } from '../capture/tracker';
 
 // ───────────── 상태 ─────────────
 
@@ -56,6 +58,8 @@ interface Calib {
   slots: (Rect | null)[];
   /** 보유 능력 버튼의 숫자 영역 (선택) */
   counters: Record<ItemKey, Rect | null>;
+  /** 영역을 지정할 때의 공유 화면 크기 */
+  frame?: { w: number; h: number };
 }
 
 type ItemKey = 'dot' | 'swap';
@@ -181,7 +185,8 @@ function requestSolve(fromScreen = false) {
   state.locked = false;
   const effort = EFFORT[($('effort') as HTMLSelectElement).value as keyof typeof EFFORT];
   const input: SolveInput = {
-    rows: state.rows.slice(),
+    // 꽉 찬 줄은 게임에서 바로 지워지므로 빈 줄로 넘긴다
+    rows: withoutFullRows(state.rows),
     hand: state.hand.map((s) => (s.used ? null : s.type)),
     items: state.items.slice(),
     inventory: { ...state.inventory },
@@ -567,8 +572,10 @@ type Source = { grab(): (Frame & { image: CanvasImageSource }) | null };
 const capture = new ScreenCapture();
 let source: Source | null = null;
 let prevSnap: Snapshot | null = null;
-/** 직전 프레임의 (보정된) 보드 */
-let lastRows: Rows | null = null;
+/** 보드 칸 상태 필터 (순간적인 오인식 거르기) */
+const boardFilter = new BoardFilter();
+/** 가장 최근 프레임 (영역 자동 맞춤에 사용) */
+let lastFrame: (Frame & { image: CanvasImageSource }) | null = null;
 /** 칸별 마지막으로 읽은 블록 색 */
 const lastColors: (string | null)[][] = Array.from({ length: H }, () => new Array<string | null>(W).fill(null));
 const itemConfirmer = new ItemConfirmer();
@@ -580,27 +587,36 @@ function calibReady() {
   return !!state.calib.board && state.calib.slots.every(Boolean);
 }
 
+/** 새 블록을 받는 등 계산을 다시 하게 될 때, 화면이 이 시간 동안 변하지 않아야 계산한다 (줄 제거·새 블록 애니메이션 대기) */
+const SETTLE_MS = 1200;
+/** 지금 인식 결과(sig)가 처음 나타난 시각 */
+let sigSince = 0;
+
 function tick() {
   if (!source) return;
   const frame = source.grab();
   if (!frame) return;
+  lastFrame = frame;
   if (!$('calibPanel').hidden) drawPreview(frame);
   if (!calibReady() || state.paused) return;
+  if (!checkFrameSize(frame)) return;
+  const now = performance.now();
 
   const slots = state.calib.slots.map((r) => readHandSlot(frame, r!));
   // 게임에서 조각을 클릭해 선택(노란 카드)한 동안에는 화면을 반영하지도, 계산하지도 않는다.
   // (조각을 끌고 다니는 중의 보드 변화도 무시) 선택이 끝나면 그때 화면부터 다시 반영한다.
   if (slots.some((s) => s.selected)) {
     enterSelectionPause();
+    recordFrame(frame, now, { selected: true, hand: slots });
     return;
   }
   leaveSelectionPause();
 
   const b = readBoard(frame, state.calib.board!);
-  // 줄 제거가 아닌데 한두 칸만 비어 보이면 오인식 → 이전 상태 유지 (아이콘 빛에 가려진 블록 등)
-  b.rows = stabilizeRows(lastRows, b.rows);
-  lastRows = b.rows;
-  // 채워져 있는데 색을 못 읽은 칸(빛에 가려 복원된 칸 등)은 직전 색을 쓴다
+  const rawRows = b.rows;
+  // 칸 상태는 일정 시간 같은 상태가 이어질 때만 바꾼다 (순간적인 오인식·아이콘 빛·애니메이션 거르기)
+  b.rows = boardFilter.update(rawRows, now);
+  // 채워져 있는데 색을 못 읽은 칸(빛에 가려 유지된 칸 등)은 직전 색을 쓴다
   for (let r = 0; r < H; r++)
     for (let c = 0; c < W; c++)
       if ((b.rows[r] >> c) & 1) {
@@ -608,8 +624,9 @@ function tick() {
         else b.colors[r][c] = lastColors[r][c];
       } else lastColors[r][c] = null;
   // 1초 이상 같은 자리에 보인 아이템만 인정 (줄 제거 번쩍임 등 걸러냄)
-  const items = itemConfirmer.update(b.items, performance.now());
+  const items = itemConfirmer.update(b.items, now);
   const counts = readCounters(frame);
+  recordFrame(frame, now, { selected: false, hand: slots, raw: rawRows, rows: b.rows, items });
   const sig =
     b.rows.join(',') +
     '|' +
@@ -622,18 +639,26 @@ function tick() {
   else {
     lastSig = sig;
     stable = 0;
+    sigSince = now;
   }
   // 애니메이션(줄 제거 등) 중 오인식을 피하려고 같은 결과가 연속 3번(약 0.5초) 나와야 반영
   if (stable < 2 || sig === appliedSig) return;
-  appliedSig = sig;
 
   const snap: Snapshot = {
     rows: b.rows,
     items,
     hand: slots.map((s) => ({ type: s.type, used: s.used })),
   };
-  const res = track(prevSnap, snap, live.items, state.inventory);
   const newBlocks = prevSnap !== null && receivedNewBlocks(prevSnap, snap);
+  // 계산으로 이어지는 변화(새 블록을 받음 / 고정 안 됨)라면 화면이 충분히 안정될 때까지 기다린다.
+  // 마지막 블록을 놓는 순간에는 줄 제거 이펙트와 새 블록이 함께 나타나기 때문이다.
+  if ((!state.locked || newBlocks) && (now - sigSince < SETTLE_MS || boardFilter.pending)) {
+    setStatus('⏳ 화면이 안정되길 기다리는 중…', 'busy');
+    return;
+  }
+  appliedSig = sig;
+
+  const res = track(prevSnap, snap, live.items, state.inventory);
   prevSnap = snap;
   res.events.forEach(addLog);
   if (slots.some((s) => s.unknown)) addLog('인식할 수 없는 조각이 있습니다 (영역을 확인하세요)');
@@ -725,6 +750,151 @@ function applyLive() {
   if (live.hand.length) state.hand = live.hand;
 }
 
+/** 화면을 처음부터 다시 읽도록 인식 상태를 모두 초기화 */
+function resetRecognition() {
+  prevSnap = null;
+  appliedSig = '';
+  lastSig = '';
+  stable = 0;
+  itemConfirmer.reset();
+  boardFilter.reset();
+  dropsPrimed = false;
+}
+
+// ───────────── 공유 화면 크기 확인 ─────────────
+
+let sizeWarnedFor = '';
+
+/** 영역을 지정할 때와 공유 화면 크기가 다르면 비율대로 맞춘다. 비율 자체가 다르면 false (다시 지정 필요) */
+function checkFrameSize(frame: Frame): boolean {
+  const c = state.calib;
+  if (!c.frame) {
+    c.frame = { w: frame.width, h: frame.height };
+    saveCalib();
+    return true;
+  }
+  if (c.frame.w === frame.width && c.frame.h === frame.height) return true;
+  const sx = frame.width / c.frame.w;
+  const sy = frame.height / c.frame.h;
+  if (Math.abs(sx - sy) <= 0.02 * Math.max(sx, sy)) {
+    const scale = (r: Rect | null): Rect | null => (r ? { x: r.x * sx, y: r.y * sy, w: r.w * sx, h: r.h * sy } : null);
+    c.board = scale(c.board);
+    c.slots = c.slots.map(scale);
+    c.counters = { dot: scale(c.counters.dot), swap: scale(c.counters.swap) };
+    addLog(`공유 화면 크기가 ${c.frame.w}×${c.frame.h} → ${frame.width}×${frame.height}로 바뀌어 영역을 비율대로 맞췄습니다`);
+    c.frame = { w: frame.width, h: frame.height };
+    saveCalib();
+    resetRecognition();
+    return true;
+  }
+  const key = `${frame.width}×${frame.height}`;
+  if (sizeWarnedFor !== key) {
+    sizeWarnedFor = key;
+    addLog(`⚠ 공유 화면(${key})의 가로세로 비율이 영역 지정 때(${c.frame.w}×${c.frame.h})와 다릅니다. 영역을 다시 지정하세요.`);
+    setStatus('⚠ 화면 크기가 바뀌었습니다 · 영역을 다시 지정하세요', 'warn');
+    openCalib();
+  }
+  return false;
+}
+
+// ───────────── 최근 화면 기록 / 저장 (문제 분석용) ─────────────
+
+const RECORD_INTERVAL_MS = 500;
+const RECORD_KEEP = 16; // 약 8초
+interface RecordInfo {
+  selected: boolean;
+  hand: { type: PieceType | null; used: boolean; selected: boolean; color: string | null; unknown: boolean }[];
+  raw?: Rows;
+  rows?: Rows;
+  items?: Item[];
+}
+const records: { time: number; area: Rect; bitmap: ImageBitmap | null; info: RecordInfo }[] = [];
+let lastRecordAt = 0;
+
+/** 보드·보유 조각·개수 영역을 모두 포함하는 사각형 */
+function recordArea(frame: Frame): Rect {
+  const rects = [state.calib.board, ...state.calib.slots, state.calib.counters.dot, state.calib.counters.swap].filter(
+    (r): r is Rect => !!r,
+  );
+  const m = 12;
+  const x0 = Math.max(0, Math.floor(Math.min(...rects.map((r) => r.x)) - m));
+  const y0 = Math.max(0, Math.floor(Math.min(...rects.map((r) => r.y)) - m));
+  const x1 = Math.min(frame.width, Math.ceil(Math.max(...rects.map((r) => r.x + r.w)) + m));
+  const y1 = Math.min(frame.height, Math.ceil(Math.max(...rects.map((r) => r.y + r.h)) + m));
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+
+function recordFrame(
+  frame: Frame & { image: CanvasImageSource },
+  now: number,
+  info: Omit<RecordInfo, 'hand'> & { hand: { type: PieceType | null; used: boolean; selected: boolean; color: string | null; unknown: boolean }[] },
+) {
+  if (now - lastRecordAt < RECORD_INTERVAL_MS) return;
+  lastRecordAt = now;
+  const area = recordArea(frame);
+  const entry = {
+    time: Date.now(),
+    area,
+    bitmap: null as ImageBitmap | null,
+    info: {
+      ...info,
+      hand: info.hand.map(({ type, used, selected, color, unknown }) => ({ type, used, selected, color, unknown })),
+    },
+  };
+  records.push(entry);
+  while (records.length > RECORD_KEEP) records.shift()?.bitmap?.close();
+  // 호출 시점의 화면을 복사해 둔다
+  createImageBitmap(frame.image, area.x, area.y, area.w, area.h)
+    .then((bm) => (entry.bitmap = bm))
+    .catch(() => {});
+}
+
+/** 최근 몇 초의 화면과 인식 결과, 현재 상태를 JSON 파일 하나로 내려받는다 */
+function saveCapture() {
+  const frames = records
+    .filter((r) => r.bitmap)
+    .map((r) => {
+      const cv = document.createElement('canvas');
+      cv.width = r.bitmap!.width;
+      cv.height = r.bitmap!.height;
+      cv.getContext('2d')!.drawImage(r.bitmap!, 0, 0);
+      return {
+        time: new Date(r.time).toISOString(),
+        area: r.area,
+        png: cv.toDataURL('image/png'),
+        selected: r.info.selected,
+        hand: r.info.hand,
+        rawRows: r.info.raw ? rowsToStrings(r.info.raw) : null,
+        rows: r.info.rows ? rowsToStrings(r.info.rows) : null,
+        items: r.info.items ?? null,
+      };
+    });
+  const data = {
+    app: 'moamoa-helper',
+    savedAt: new Date().toISOString(),
+    calib: state.calib,
+    state: {
+      rows: rowsToStrings(state.rows),
+      hand: state.hand,
+      items: state.items,
+      inventory: state.inventory,
+      locked: state.locked,
+      plan: state.plan ? { complete: state.plan.complete, moves: state.plan.moves } : null,
+    },
+    log: state.log,
+    frames,
+  };
+  const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  const t = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  a.download = `moamoa-${t.getFullYear()}${pad(t.getMonth() + 1)}${pad(t.getDate())}-${pad(t.getHours())}${pad(t.getMinutes())}${pad(t.getSeconds())}.json`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  addLog(`화면 저장: 최근 ${frames.length}장 (${a.download})`);
+}
+
 setInterval(tick, 250);
 
 // ───────────── 능력 드롭 확인 (1초마다) ─────────────
@@ -789,11 +959,7 @@ $('btnCapture').onclick = async () => {
   try {
     await capture.start();
     source = capture;
-    prevSnap = null;
-    itemConfirmer.reset();
-    lastRows = null;
-    dropsPrimed = false;
-    appliedSig = '';
+    resetRecognition();
     $('btnCapture').textContent = '화면 공유 중지';
     addLog('화면 공유 시작');
     if (!calibReady()) openCalib();
@@ -819,11 +985,7 @@ $<HTMLInputElement>('fileInput').onchange = async (e) => {
   const img = ctx.getImageData(0, 0, cv.width, cv.height);
   if (capture.active) capture.stop();
   source = { grab: () => ({ data: img.data, width: img.width, height: img.height, image: cv }) };
-  prevSnap = null;
-  itemConfirmer.reset();
-  lastRows = null;
-  dropsPrimed = false;
-  appliedSig = '';
+  resetRecognition();
   addLog(`이미지 열기: ${file.name} (${img.width}×${img.height})`);
   if (!calibReady()) openCalib();
 };
@@ -845,23 +1007,26 @@ $('btnReset').onclick = () => {
   live.colors = [];
   live.items = [];
   live.hand = [];
-  prevSnap = null;
-  itemConfirmer.reset();
-  lastRows = null;
-  dropsPrimed = false;
-  appliedSig = '';
+  resetRecognition();
   requestSolve();
 };
 
 $('effort').onchange = () => requestSolve(state.locked);
 
+$('btnSave').onclick = () => {
+  if (!records.length) {
+    addLog('저장할 화면이 없습니다 (화면 공유와 영역 지정 후 사용하세요)');
+    return;
+  }
+  saveCapture();
+};
+
 $('btnResolve').onclick = () => {
   if (source) {
-    // 보정 기억을 버리고 다음 프레임을 그대로 다시 읽은 뒤 계산한다
-    lastRows = null;
-    prevSnap = null;
-    appliedSig = '';
+    // 기억해 둔 인식 상태를 버리고 지금 화면을 처음부터 다시 읽은 뒤 계산한다
+    resetRecognition();
     state.locked = false;
+    setStatus('지금 화면을 다시 읽는 중…', 'busy');
     return;
   }
   requestSolve(false);
@@ -881,7 +1046,7 @@ $('btnLock').onclick = () => {
 
 const TARGETS = ['보드', '조각 1', '조각 2', '조각 3', '점 찍기 개수', '바꿔 뽑기 개수'] as const;
 const TARGET_HELP = [
-  '보드 격자(10×16)의 바깥 테두리에 딱 맞게 드래그하세요.',
+  '보드 격자(10×16)를 대략 드래그하면 격자선에 자동으로 맞춥니다. 칸마다 찍힌 점이 각 칸 가운데에 오는지 확인하세요.',
   '1번 보유 조각의 흰 영역(블록 그림만, 글자·버튼 제외)을 드래그하세요.',
   '2번 보유 조각의 흰 영역을 드래그하세요.',
   '3번 보유 조각의 흰 영역을 드래그하세요.',
@@ -899,6 +1064,8 @@ function getRect(i: number): Rect | null {
   return state.calib.counters[ITEM_KEYS[i - 4]];
 }
 function setRect(i: number, r: Rect) {
+  // 영역을 지정한 공유 화면 크기를 함께 기억한다 (나중에 크기가 바뀌면 비율대로 맞춤)
+  if (preview.width && preview.height) state.calib.frame = { w: preview.width, h: preview.height };
   if (i === 0) state.calib.board = r;
   else if (i <= 3) state.calib.slots[i - 1] = r;
   else state.calib.counters[ITEM_KEYS[i - 4]] = r;
@@ -978,6 +1145,36 @@ function drawPreview(frame: Frame & { image: CanvasImageSource }) {
     pctx.font = `${12 * lw}px sans-serif`;
     pctx.fillText(name, r.x + 2, r.y - 4 * lw);
   });
+  // 보드 칸마다 인식 결과 표시: 채움=블록 색 점, 빈칸=작은 원, 아이템=글자
+  const br = state.calib.board;
+  if (br) {
+    const read = readBoard(frame, br);
+    const pw = br.w / W;
+    const ph = br.h / H;
+    const rad = Math.max(2, Math.min(pw, ph) * 0.18);
+    const dotColor: Record<string, string> = { blue: '#1c7ed6', pink: '#d6336c', yellow: '#f08c00', green: '#2b8a3e' };
+    for (let r = 0; r < H; r++)
+      for (let c = 0; c < W; c++) {
+        const cx = br.x + (c + 0.5) * pw;
+        const cy = br.y + (r + 0.5) * ph;
+        const filled = ((read.rows[r] >> c) & 1) === 1;
+        pctx.beginPath();
+        pctx.arc(cx, cy, rad, 0, Math.PI * 2);
+        pctx.lineWidth = Math.max(1, rad * 0.4);
+        pctx.strokeStyle = '#fff';
+        if (filled) {
+          pctx.fillStyle = dotColor[read.colors[r][c] ?? ''] ?? '#495057';
+          pctx.fill();
+        }
+        pctx.stroke();
+        const it = read.items.find((x) => x.r === r && x.c === c);
+        if (it) {
+          pctx.fillStyle = '#fff';
+          pctx.font = `bold ${Math.round(ph * 0.45)}px sans-serif`;
+          pctx.fillText(it.type === 'dot' ? '⊙' : '⇄', cx + rad, cy - rad);
+        }
+      }
+  }
   if (drag) {
     pctx.strokeStyle = '#ff3b6b';
     pctx.setLineDash([6, 4]);
@@ -1013,11 +1210,32 @@ window.addEventListener('mouseup', () => {
   };
   drag = null;
   if (r.w < 4 || r.h < 4) return;
-  setRect(calibTarget, r);
+  setRect(calibTarget, calibTarget === 0 ? snapToGrid(r) : r);
   appliedSig = '';
   calibTarget = Math.min(calibTarget + 1, TARGETS.length - 1);
   renderCalibHead();
 });
+
+/** 보드 영역을 실제 격자선에 맞춘다. 맞춤이 더 나쁘면 원래 영역 그대로 */
+function snapToGrid(r: Rect): Rect {
+  if (!lastFrame) return r;
+  const res = snapBoardRect(lastFrame, r);
+  if (res.after <= res.before) return r;
+  const d = (a: number, b: number) => (a - b >= 0 ? '+' : '') + (a - b).toFixed(1);
+  addLog(`보드 영역을 격자에 자동으로 맞췄습니다 (x ${d(res.rect.x, r.x)}, y ${d(res.rect.y, r.y)}, 너비 ${d(res.rect.w, r.w)}, 높이 ${d(res.rect.h, r.h)})`);
+  return res.rect;
+}
+
+$('btnSnap').onclick = () => {
+  const r = state.calib.board;
+  if (!r) {
+    addLog('먼저 보드 영역을 드래그해 지정하세요');
+    return;
+  }
+  setRect(0, snapToGrid(r));
+  resetRecognition();
+  renderCalibHead();
+};
 
 $('btnCalib').onclick = () => {
   if ($('calibPanel').hidden) openCalib();

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { emptyRows, place, rowsFromStrings, rowsToStrings } from '../src/core/board';
 import { PIECES, PIECE_TYPES, transformSteps } from '../src/core/pieces';
 import { solve } from '../src/core/search';
-import { ItemConfirmer, receivedNewBlocks, stabilizeRows, track } from '../src/capture/tracker';
+import { BoardFilter, ItemConfirmer, receivedNewBlocks, track, withoutFullRows } from '../src/capture/tracker';
 
 describe('블록 정의', () => {
   it('19종, 칸 수가 게임 표기와 같다', () => {
@@ -144,27 +144,43 @@ describe('아이템 확인 (깜빡 나타나는 이펙트 거르기)', () => {
   });
 });
 
-describe('보드 깜빡임 보정 (칸은 줄이 지워질 때만 빈다)', () => {
-  const prev = rowsFromStrings(['####.#####', '##.....###']);
-  it('지워지지 않은 줄에서 한두 칸만 비어 보이면 이전 상태 유지', () => {
-    const cur = rowsFromStrings(['####...###', '##.....###']); // 0행 5열이 아이콘 빛에 가려 빈칸으로 읽힘
-    expect(rowsToStrings(stabilizeRows(prev, cur)).slice(0, 2)).toEqual(['####.#####', '##.....###']);
+describe('보드 칸 필터 (순간적인 오인식 거르기)', () => {
+  const base = rowsFromStrings(['####.#####', '##.....###', '..........']);
+  const run = (frames: [number, string[]][]) => {
+    const f = new BoardFilter();
+    let out = base;
+    for (const [t, rows] of frames) out = f.update(rowsFromStrings(rows), t);
+    return { rows: rowsToStrings(out).slice(0, 3), filter: f };
+  };
+  const B = ['####.#####', '##.....###', '..........'];
+
+  it('한 순간 보인 가짜 블록은 반영하지 않고, 사라지면 남지도 않는다', () => {
+    const glitch = ['####.#####', '##.....###', '...#......'];
+    const { rows, filter } = run([[0, B], [250, glitch], [500, B], [750, B], [1000, B]]);
+    expect(rows).toEqual(B);
+    expect(filter.pending).toBe(false);
   });
-  it('줄이 통째로 비면 줄 제거로 받아들인다', () => {
-    const cur = rowsFromStrings(['..........', '##.....###']);
-    expect(rowsToStrings(stabilizeRows(prev, cur))[0]).toBe('..........');
+
+  it('0.5초 이상 계속 보이는 새 블록은 반영', () => {
+    const placed = ['####.#####', '##.....###', '..###.....'];
+    expect(run([[0, B], [250, placed], [500, placed], [750, placed]]).rows).toEqual(placed);
   });
-  it('여러 칸이 한꺼번에 비면 그대로 받아들인다 (아이콘 등으로 일부만 남은 줄 제거)', () => {
-    const cur = rowsFromStrings(['....#.....', '##.....###']);
-    expect(rowsToStrings(stabilizeRows(prev, cur))[0]).toBe('....#.....');
+
+  it('한두 칸만 잠깐 비어 보이면 유지 (아이콘 빛), 1.5초 넘게 계속되면 반영', () => {
+    const hidden = ['####.###.#', '##.....###', '..........'];
+    expect(run([[0, B], [250, hidden], [500, hidden], [1000, hidden]]).rows).toEqual(B);
+    expect(run([[0, B], [250, hidden], [1000, hidden], [1800, hidden]]).rows).toEqual(hidden);
   });
-  it('새로 채워진 칸은 그대로 반영', () => {
-    const cur = rowsFromStrings(['####.#####', '#####..###']);
-    expect(rowsToStrings(stabilizeRows(prev, cur))[1]).toBe('#####..###');
+
+  it('줄 제거(여러 칸이 함께 빔)는 0.5초 뒤 반영', () => {
+    const cleared = ['..........', '##.....###', '..........'];
+    expect(run([[0, B], [250, cleared], [500, cleared], [800, cleared]]).rows).toEqual(cleared);
   });
-  it('복원하면 꽉 찬 줄이 되는 경우는 복원하지 않는다 (꽉 찬 줄은 이미 지워졌어야 함)', () => {
-    // 5열이 새로 채워졌는데 10열이 비어 보임 → 10열을 복원하면 꽉 찬 줄이 되므로 그대로 둔다
-    const cur = rowsFromStrings(['#########.']);
-    expect(rowsToStrings(stabilizeRows(rowsFromStrings(['####.#####']), cur))[0]).toBe('#########.');
+
+  it('꽉 찬 줄은 빈 줄로 본다', () => {
+    expect(rowsToStrings(withoutFullRows(rowsFromStrings(['##########', '#.........'])).slice(0, 2))).toEqual([
+      '..........',
+      '#.........',
+    ]);
   });
 });

@@ -18,6 +18,7 @@
         <button id="btnResolve" title="지금 화면 기준으로 다시 계산">다시 계산</button>
         <button id="btnPause">일시정지</button>
         <button id="btnReset" title="보드/손패/아이템 초기화">초기화</button>
+        <button id="btnSave" title="최근 약 8초의 화면과 인식 결과를 파일로 저장 (잘못 인식될 때 분석용)">화면 저장</button>
         <select id="effort" title="탐색 강도">
           <option value="fast">빠름</option>
           <option value="normal" selected>보통</option>
@@ -32,6 +33,7 @@
         <div class="targets" id="calibTargets"></div>
         <span id="calibMsg" class="calib-msg"></span>
         <div class="rect-inputs" id="rectInputs"></div>
+        <button id="btnSnap" title="보드 영역을 실제 격자선에 자동으로 맞춤">격자 자동 맞춤</button>
         <button id="btnCalibDone" class="primary">완료</button>
       </div>
       <div class="preview-wrap"><canvas id="preview"></canvas></div>

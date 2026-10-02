@@ -4,7 +4,7 @@ import { PNG } from 'pngjs';
 import { describe, expect, it } from 'vitest';
 import { rowsToStrings } from '../src/core/board';
 import { readBoard, readHandSlot, type Frame } from '../src/capture/recognize';
-import { DEFAULT_DIGITS, matchDigit, readCell, readDigitSig } from '../src/capture/recognize';
+import { DEFAULT_DIGITS, matchDigit, readCell, readDigitSig, snapBoardRect } from '../src/capture/recognize';
 import type { PieceType } from '../src/core/pieces';
 
 const load = (name: string): Frame => {
@@ -50,6 +50,27 @@ describe('보드 인식 (실제 게임 스크린샷)', () => {
     expect(readHandSlot(f, { x: 312, y: 230, w: 50, h: 60 })).toMatchObject({ type: null, used: true });
     expect(readHandSlot(f, { x: 312, y: 305, w: 50, h: 60 })).toMatchObject({ type: 'ㅋ', color: 'yellow', used: false });
   });
+});
+
+describe('보드 영역 자동 맞춤', () => {
+  const f = load('board.png');
+  const truth = readBoard(f, { x: 33, y: 127, w: 260, h: 416 }).rows;
+  const cases = [
+    { x: 23, y: 117, w: 280, h: 436 }, // 바깥 액자에 맞춰 크게 잡음
+    { x: 40, y: 133, w: 250, h: 400 }, // 안쪽으로 작게 잡음
+    { x: 28, y: 135, w: 270, h: 420 },
+    { x: 38, y: 120, w: 255, h: 430 },
+  ];
+  for (const rect of cases) {
+    it(`(${rect.x},${rect.y},${rect.w}×${rect.h}) → 격자에 맞춰 160칸 모두 정확`, () => {
+      const snapped = snapBoardRect(f, rect);
+      expect(Math.abs(snapped.rect.x - 33)).toBeLessThanOrEqual(2);
+      expect(Math.abs(snapped.rect.y - 127)).toBeLessThanOrEqual(2);
+      expect(Math.abs(snapped.rect.w - 260)).toBeLessThanOrEqual(3);
+      expect(Math.abs(snapped.rect.h - 416)).toBeLessThanOrEqual(4);
+      expect(readBoard(f, snapped.rect).rows).toEqual(truth);
+    });
+  }
 });
 
 describe('보유 능력 개수', () => {

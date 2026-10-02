@@ -134,18 +134,71 @@ export class ItemConfirmer {
 }
 
 /**
- * 게임 규칙상 칸은 줄 전체가 지워질 때만 비워진다.
- * 지워지지 않은 줄에서 한두 칸만 갑자기 빈칸으로 읽히면 (아이템 아이콘의 빛 등으로 인한) 오인식으로 보고
- * 이전 상태(채워짐)를 유지한다. 여러 칸이 한꺼번에 비면 줄 제거로 보고 그대로 받아들인다.
+ * 보드 칸 상태 필터.
+ * 인식 결과가 한 순간 튀어도 바로 반영하지 않고, 같은 상태가 일정 시간 이어질 때만 칸을 바꾼다.
+ * - 빈칸 → 블록: fillMs 이상 계속 블록으로 보일 때
+ * - 블록 → 빈칸: 줄 제거(한 줄에서 clearCells칸 이상이 함께 빔)면 clearMs, 한두 칸만 비면 emptyMs
+ *   (게임에서 칸은 줄이 지워질 때만 비므로, 한두 칸만 비어 보이는 건 아이콘 빛 등에 의한 오인식일 가능성이 크다)
+ * 꽉 찬 줄은 게임에서 바로 지워지므로 결과에 남기지 않는다.
  */
-export const MAX_FLICKER_CELLS = 2;
+export interface BoardFilterOptions {
+  fillMs: number;
+  emptyMs: number;
+  clearMs: number;
+  clearCells: number;
+}
 
-export function stabilizeRows(prev: Rows | null, cur: Rows): Rows {
-  if (!prev) return cur.slice();
-  return cur.map((row, r) => {
-    const lost = prev[r] & ~row;
-    if (lost === 0 || row === 0) return row;
-    // 복원 결과가 꽉 찬 줄이면 있을 수 없는 상태(꽉 찬 줄은 지워진다)이므로 그대로 둔다
-    return popcount(lost) <= MAX_FLICKER_CELLS && (row | lost) !== FULL ? row | lost : row;
-  });
+export const DEFAULT_BOARD_FILTER: BoardFilterOptions = { fillMs: 500, emptyMs: 1500, clearMs: 500, clearCells: 3 };
+
+export class BoardFilter {
+  private stable: Rows | null = null;
+  /** 칸 번호 → 인식 결과가 확정 상태와 달라지기 시작한 시각 */
+  private since = new Map<number, number>();
+
+  constructor(private readonly opt: BoardFilterOptions = DEFAULT_BOARD_FILTER) {}
+
+  /** 확정 상태와 다르게 보이는 칸이 남아 있는가 (아직 화면이 안정되지 않음) */
+  get pending(): boolean {
+    return this.since.size > 0;
+  }
+
+  update(raw: Rows, now: number): Rows {
+    if (!this.stable) {
+      this.stable = withoutFullRows(raw);
+      return this.stable.slice();
+    }
+    const next = this.stable.slice();
+    for (let r = 0; r < H; r++) {
+      const diff = (raw[r] ^ this.stable[r]) & FULL;
+      const lost = this.stable[r] & ~raw[r];
+      const clearing = popcount(lost) >= this.opt.clearCells;
+      for (let c = 0; c < W; c++) {
+        const idx = r * W + c;
+        const bit = 1 << c;
+        if (!(diff & bit)) {
+          this.since.delete(idx);
+          continue;
+        }
+        const t0 = this.since.get(idx) ?? now;
+        this.since.set(idx, t0);
+        const need = raw[r] & bit ? this.opt.fillMs : clearing ? this.opt.clearMs : this.opt.emptyMs;
+        if (now - t0 >= need) {
+          next[r] ^= bit;
+          this.since.delete(idx);
+        }
+      }
+    }
+    this.stable = withoutFullRows(next);
+    return this.stable.slice();
+  }
+
+  reset(): void {
+    this.stable = null;
+    this.since.clear();
+  }
+}
+
+/** 꽉 찬 줄은 게임에서 바로 지워지므로 빈 줄로 본다 */
+export function withoutFullRows(rows: Rows): Rows {
+  return rows.map((row) => (row === FULL ? 0 : row));
 }
