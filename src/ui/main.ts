@@ -110,6 +110,19 @@ function learnDigit(sig: DigitSig, value: number) {
   }
 }
 
+/** 학습한 숫자를 지우고 기본 템플릿(0)만 남긴다 */
+function resetDigits() {
+  state.digits = structuredClone(DEFAULT_DIGITS);
+  try {
+    localStorage.removeItem(DIGITS_KEY);
+  } catch {
+    /* 무시 */
+  }
+  addLog('숫자 학습 초기화');
+  appliedSig = ''; // 현재 화면의 숫자를 다시 읽는다
+  renderInventory();
+}
+
 function saveCalib() {
   try {
     localStorage.setItem(CALIB_KEY, JSON.stringify(state.calib));
@@ -472,6 +485,26 @@ function renderInventory() {
   cap.className = 'muted';
   cap.textContent = `보유 ${total}/${INVENTORY_CAP} · 보드 위 아이템 ${state.items.length}개`;
   wrap.appendChild(cap);
+
+  // 숫자 학습 현황 + 초기화 (개수 영역을 지정했거나 학습한 숫자가 있을 때만)
+  const learned = Object.keys(state.digits)
+    .filter((d) => state.digits[d].some((sig) => !DEFAULT_DIGITS[d]?.includes(sig)))
+    .sort();
+  if (learned.length || ITEM_KEYS.some((k) => state.calib.counters[k])) {
+    const row = document.createElement('div');
+    row.className = 'digit-learned';
+    const text = document.createElement('span');
+    text.className = 'muted';
+    text.textContent = `학습한 숫자: ${learned.length ? learned.join(', ') : '없음'} (0은 기본 내장)`;
+    const reset = document.createElement('button');
+    reset.textContent = '숫자 학습 초기화';
+    reset.disabled = learned.length === 0;
+    reset.onclick = () => {
+      if (confirm('학습한 숫자를 모두 지울까요? 기본 내장된 0만 남습니다.')) resetDigits();
+    };
+    row.append(text, reset);
+    wrap.appendChild(row);
+  }
 }
 
 function renderSwapAdvice() {

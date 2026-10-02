@@ -454,3 +454,15 @@ button:disabled {
   flex: 1;
   padding: 4px 0;
 }
+
+.digit-learned {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+.digit-learned button {
+  padding: 3px 8px;
+  font-size: 12px;
+}
