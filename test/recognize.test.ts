@@ -153,6 +153,30 @@ describe('아이템 아이콘', () => {
   });
 });
 
+describe('파란 블록 위의 점 찍기 (실제 스크린샷)', () => {
+  const f = load('dot-on-blue.png'); // 2배 확대 화면, 칸 52px, 가운데 칸에 아이콘
+  const B = { x: 20, y: 28, w: 520, h: 832 };
+  it('가운데 칸: 파랑 블록 + 점 찍기', () => {
+    expect(readCell(f, B, 0, 1)).toMatchObject({ filled: true, color: 'blue', item: 'dot' });
+    expect(readCell(f, B, 0, 0)).toMatchObject({ filled: true, color: 'blue', item: null });
+    expect(readCell(f, B, 0, 2)).toMatchObject({ filled: true, color: 'blue', item: null });
+  });
+  it('절반 크기로 줄여도 (색이 섞여도) 인식', () => {
+    const w = f.width >> 1;
+    const h = f.height >> 1;
+    const d = new Uint8Array(w * h * 4);
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++)
+        for (let k = 0; k < 4; k++) {
+          let acc = 0;
+          for (let dy = 0; dy < 2; dy++) for (let dx = 0; dx < 2; dx++) acc += f.data[((y * 2 + dy) * f.width + x * 2 + dx) * 4 + k];
+          d[(y * w + x) * 4 + k] = acc / 4;
+        }
+    const half = { data: d, width: w, height: h };
+    expect(readCell(half, { x: 10, y: 14, w: 260, h: 416 }, 0, 1)).toMatchObject({ filled: true, item: 'dot' });
+  });
+});
+
 describe('보유 조각 인식 (조각별 스크린샷)', () => {
   const cases: [number, PieceType, string][] = [
     [2, '·', 'pink'], [3, 'ㅈ', 'green'], [4, 'ㄷ', 'pink'], [5, 'ㅣ', 'blue'], [6, 'ㅌ', 'yellow'],

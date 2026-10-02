@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { emptyRows, place, rowsFromStrings, rowsToStrings } from '../src/core/board';
 import { PIECES, PIECE_TYPES, transformSteps } from '../src/core/pieces';
 import { solve } from '../src/core/search';
-import { ItemConfirmer, receivedNewBlocks, track } from '../src/capture/tracker';
+import { ItemConfirmer, receivedNewBlocks, stabilizeRows, track } from '../src/capture/tracker';
 
 describe('블록 정의', () => {
   it('19종, 칸 수가 게임 표기와 같다', () => {
@@ -141,5 +141,30 @@ describe('아이템 확인 (깜빡 나타나는 이펙트 거르기)', () => {
     expect(ic.update([], 1250)).toEqual([dot]);
     expect(ic.update([dot], 1500)).toEqual([dot]);
     expect(ic.update([], 2500)).toEqual([]); // 오래 안 보이면 제거
+  });
+});
+
+describe('보드 깜빡임 보정 (칸은 줄이 지워질 때만 빈다)', () => {
+  const prev = rowsFromStrings(['####.#####', '##.....###']);
+  it('지워지지 않은 줄에서 한두 칸만 비어 보이면 이전 상태 유지', () => {
+    const cur = rowsFromStrings(['####...###', '##.....###']); // 0행 5열이 아이콘 빛에 가려 빈칸으로 읽힘
+    expect(rowsToStrings(stabilizeRows(prev, cur)).slice(0, 2)).toEqual(['####.#####', '##.....###']);
+  });
+  it('줄이 통째로 비면 줄 제거로 받아들인다', () => {
+    const cur = rowsFromStrings(['..........', '##.....###']);
+    expect(rowsToStrings(stabilizeRows(prev, cur))[0]).toBe('..........');
+  });
+  it('여러 칸이 한꺼번에 비면 그대로 받아들인다 (아이콘 등으로 일부만 남은 줄 제거)', () => {
+    const cur = rowsFromStrings(['....#.....', '##.....###']);
+    expect(rowsToStrings(stabilizeRows(prev, cur))[0]).toBe('....#.....');
+  });
+  it('새로 채워진 칸은 그대로 반영', () => {
+    const cur = rowsFromStrings(['####.#####', '#####..###']);
+    expect(rowsToStrings(stabilizeRows(prev, cur))[1]).toBe('#####..###');
+  });
+  it('복원하면 꽉 찬 줄이 되는 경우는 복원하지 않는다 (꽉 찬 줄은 이미 지워졌어야 함)', () => {
+    // 5열이 새로 채워졌는데 10열이 비어 보임 → 10열을 복원하면 꽉 찬 줄이 되므로 그대로 둔다
+    const cur = rowsFromStrings(['#########.']);
+    expect(rowsToStrings(stabilizeRows(rowsFromStrings(['####.#####']), cur))[0]).toBe('#########.');
   });
 });

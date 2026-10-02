@@ -54,9 +54,13 @@ function isPurple([r, g, b]: RGB): boolean {
   return r > 120 && r < 230 && b > 170 && g < 140;
 }
 
-/** 점 찍기 아이콘의 진한 남색 테두리 */
+/**
+ * 점 찍기 아이콘의 진한 남색 테두리.
+ * 화면 배율 때문에 하늘색 고리와 섞여 (16,142,184) 정도로 보이기도 해서 G를 넉넉히 둔다.
+ * (파랑 블록 테두리 (37,163,246)·빈칸 배경은 R 또는 G로 걸러진다)
+ */
 function isDotNavy([r, g, b]: RGB): boolean {
-  return r < 60 && g < 110 && b > 100;
+  return r < 50 && g < 150 && b > 100;
 }
 
 /** 점 찍기 아이콘의 형광 하늘색 고리 */
@@ -120,9 +124,22 @@ export function readCell(f: Frame, board: Rect, r: number, c: number): CellRead 
     ...cellPatch(f, board, r, c, 0.73, 0.73, 0.9, 0.9),
   ];
   const votes = new Map<string, number>();
-  for (const p of corners) {
-    const k = classify(p);
-    if (k) votes.set(k, (votes.get(k) ?? 0) + 1);
+  const vote = (px: RGB[]) => {
+    for (const p of px) {
+      const k = classify(p);
+      if (k) votes.set(k, (votes.get(k) ?? 0) + 1);
+    }
+  };
+  vote(corners);
+  const item = detectItem(cellPatch(f, board, r, c, 0.15, 0.15, 0.85, 0.85));
+  // 아이템 아이콘의 빛이 모서리를 덮어 판단이 안 서면, 칸 바깥 테두리 쪽도 본다
+  let decided = 0;
+  for (const n of votes.values()) decided += n;
+  if (item && decided < corners.length * 0.25) {
+    vote(cellPatch(f, board, r, c, 0.03, 0.03, 0.97, 0.12));
+    vote(cellPatch(f, board, r, c, 0.03, 0.88, 0.97, 0.97));
+    vote(cellPatch(f, board, r, c, 0.03, 0.12, 0.12, 0.88));
+    vote(cellPatch(f, board, r, c, 0.88, 0.12, 0.97, 0.88));
   }
   let color: string | null = null;
   let blockVotes = 0;
@@ -132,7 +149,6 @@ export function readCell(f: Frame, board: Rect, r: number, c: number): CellRead 
       color = k;
     }
   const filled = blockVotes > (votes.get('empty') ?? 0) && blockVotes >= corners.length * 0.1;
-  const item = detectItem(cellPatch(f, board, r, c, 0.15, 0.15, 0.85, 0.85));
   return { filled, color: filled ? color : null, item };
 }
 

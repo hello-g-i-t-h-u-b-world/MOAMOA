@@ -26,7 +26,7 @@ import {
   type Frame,
   type Rect,
 } from '../capture/recognize';
-import { ItemConfirmer, receivedNewBlocks, track, type Snapshot } from '../capture/tracker';
+import { ItemConfirmer, receivedNewBlocks, stabilizeRows, track, type Snapshot } from '../capture/tracker';
 
 // ───────────── 상태 ─────────────
 
@@ -567,6 +567,8 @@ type Source = { grab(): (Frame & { image: CanvasImageSource }) | null };
 const capture = new ScreenCapture();
 let source: Source | null = null;
 let prevSnap: Snapshot | null = null;
+/** 직전 프레임의 (보정된) 보드 */
+let lastRows: Rows | null = null;
 const itemConfirmer = new ItemConfirmer();
 let lastSig = '';
 let stable = 0;
@@ -593,6 +595,9 @@ function tick() {
   leaveSelectionPause();
 
   const b = readBoard(frame, state.calib.board!);
+  // 줄 제거가 아닌데 한두 칸만 비어 보이면 오인식 → 이전 상태 유지 (아이콘 빛에 가려진 블록 등)
+  b.rows = stabilizeRows(lastRows, b.rows);
+  lastRows = b.rows;
   // 1초 이상 같은 자리에 보인 아이템만 인정 (줄 제거 번쩍임 등 걸러냄)
   const items = itemConfirmer.update(b.items, performance.now());
   const counts = readCounters(frame);
@@ -777,6 +782,7 @@ $('btnCapture').onclick = async () => {
     source = capture;
     prevSnap = null;
     itemConfirmer.reset();
+    lastRows = null;
     dropsPrimed = false;
     appliedSig = '';
     $('btnCapture').textContent = '화면 공유 중지';
@@ -806,6 +812,7 @@ $<HTMLInputElement>('fileInput').onchange = async (e) => {
   source = { grab: () => ({ data: img.data, width: img.width, height: img.height, image: cv }) };
   prevSnap = null;
   itemConfirmer.reset();
+  lastRows = null;
   dropsPrimed = false;
   appliedSig = '';
   addLog(`이미지 열기: ${file.name} (${img.width}×${img.height})`);
@@ -831,6 +838,7 @@ $('btnReset').onclick = () => {
   live.hand = [];
   prevSnap = null;
   itemConfirmer.reset();
+  lastRows = null;
   dropsPrimed = false;
   appliedSig = '';
   requestSolve();
@@ -839,8 +847,15 @@ $('btnReset').onclick = () => {
 $('effort').onchange = () => requestSolve(state.locked);
 
 $('btnResolve').onclick = () => {
-  if (source) applyLive();
-  requestSolve(!!source);
+  if (source) {
+    // 보정 기억을 버리고 다음 프레임을 그대로 다시 읽은 뒤 계산한다
+    lastRows = null;
+    prevSnap = null;
+    appliedSig = '';
+    state.locked = false;
+    return;
+  }
+  requestSolve(false);
 };
 
 $('btnLock').onclick = () => {

@@ -1,5 +1,5 @@
 // 연속된 화면 인식 결과를 비교해 아이템 획득/사용을 추적한다.
-import { H, INVENTORY_CAP, W, popcount, type Inventory, type Item, type Rows } from '../core/board';
+import { FULL, H, INVENTORY_CAP, W, popcount, type Inventory, type Item, type Rows } from '../core/board';
 import type { PieceType } from '../core/pieces';
 
 export interface SlotState {
@@ -131,4 +131,21 @@ export class ItemConfirmer {
   reset(): void {
     this.seen.clear();
   }
+}
+
+/**
+ * 게임 규칙상 칸은 줄 전체가 지워질 때만 비워진다.
+ * 지워지지 않은 줄에서 한두 칸만 갑자기 빈칸으로 읽히면 (아이템 아이콘의 빛 등으로 인한) 오인식으로 보고
+ * 이전 상태(채워짐)를 유지한다. 여러 칸이 한꺼번에 비면 줄 제거로 보고 그대로 받아들인다.
+ */
+export const MAX_FLICKER_CELLS = 2;
+
+export function stabilizeRows(prev: Rows | null, cur: Rows): Rows {
+  if (!prev) return cur.slice();
+  return cur.map((row, r) => {
+    const lost = prev[r] & ~row;
+    if (lost === 0 || row === 0) return row;
+    // 복원 결과가 꽉 찬 줄이면 있을 수 없는 상태(꽉 찬 줄은 지워진다)이므로 그대로 둔다
+    return popcount(lost) <= MAX_FLICKER_CELLS && (row | lost) !== FULL ? row | lost : row;
+  });
 }
