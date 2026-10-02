@@ -3,7 +3,13 @@
 "한글 모아모아" 미니게임 화면을 실시간으로 읽어서 **오래 살아남기 위한 최적의 배치 순서**를 추천하는 웹 앱입니다.
 화면을 읽기만 하고 마우스·키보드 조작은 하지 않습니다.
 
-## 실행
+## 바로 사용하기
+
+설치 없이 브라우저(Chrome/Edge 권장)에서 열면 됩니다: **https://hello-g-i-t-h-u-b-world.github.io/MOAMOA/**
+
+`main` 브랜치에 push하면 GitHub Actions가 테스트 → 빌드 → GitHub Pages 배포를 자동으로 합니다 (`.github/workflows/deploy.yml`).
+
+## 로컬 실행
 
 ```bash
 npm install
