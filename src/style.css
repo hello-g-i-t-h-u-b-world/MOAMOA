@@ -527,3 +527,35 @@ button:disabled {
     filter: brightness(1.6);
   }
 }
+
+/* 추천 숫자 색: 보유 조각 1·2·3번마다 다른 색, 보드 칸과 추천 순서 배지가 같은 색.
+   어떤 블록 색 위에서도 보이도록 흰 외곽선을 두른다. */
+.cell.ghost.num-0,
+.cell.ghost.num-1,
+.cell.ghost.num-2,
+.badge.num-0,
+.badge.num-1,
+.badge.num-2 {
+  font-weight: 900;
+  font-size: 16px;
+  text-shadow: none;
+  -webkit-text-stroke: 3px #fff;
+  paint-order: stroke fill;
+}
+.num-0 {
+  color: #e03131 !important;
+}
+.num-1 {
+  color: #1c3d8c !important;
+}
+.num-2 {
+  color: #7b2cbf !important;
+}
+.slot-title.num-0,
+.slot-title.num-1,
+.slot-title.num-2 {
+  font-weight: 800;
+  background: #fff;
+  border-radius: 99px;
+  padding: 0 8px;
+}

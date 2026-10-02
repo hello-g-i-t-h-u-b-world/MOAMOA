@@ -46,6 +46,11 @@ function moveColorClass(m: Move, i: number): string {
   return color ? `gc-${color}` : `ghost-${i % 4}`;
 }
 
+/** 숫자 색 클래스: 보유 조각 칸(1~3번)마다 다른 색. 보드 칸과 추천 순서 배지에 똑같이 쓴다. */
+function moveNumberClass(m: Move): string {
+  return m.kind === 'dot' ? 'num-dot' : `num-${m.slot}`;
+}
+
 interface Calib {
   board: Rect | null;
   slots: (Rect | null)[];
@@ -298,7 +303,7 @@ function renderBoard() {
       el.textContent = '';
       if (filled) el.classList.add('filled', `c-${color}`);
       if (g !== undefined) {
-        el.classList.add('ghost', moveColorClass(plan!.moves[g], g));
+        el.classList.add('ghost', moveColorClass(plan!.moves[g], g), moveNumberClass(plan!.moves[g]));
         el.textContent = String(g + 1);
       } else if (item) {
         el.textContent = item.type === 'swap' ? '⇄' : '⊙';
@@ -361,7 +366,7 @@ function renderMoves() {
       renderMoves();
     };
     const badge = document.createElement('span');
-    badge.className = `badge ${moveColorClass(m, i)}`;
+    badge.className = `badge ${moveColorClass(m, i)} ${moveNumberClass(m)}`;
     badge.textContent = String(i + 1);
     li.appendChild(badge);
     const body = document.createElement('div');
@@ -401,7 +406,7 @@ function renderHand() {
     const card = document.createElement('div');
     card.className = `slot ${s.used ? 'used' : ''}`;
     const title = document.createElement('div');
-    title.className = 'slot-title';
+    title.className = `slot-title num-${i}`;
     title.textContent = `${i + 1}번`;
     card.appendChild(title);
     if (s.type && !s.used) {
