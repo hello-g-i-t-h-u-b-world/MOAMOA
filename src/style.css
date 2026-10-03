@@ -271,6 +271,15 @@ button:disabled {
 .advice p {
   margin: 8px 0 0;
 }
+.verdict .outlook {
+  font-size: 13px;
+}
+.verdict .outlook b {
+  color: var(--good);
+}
+.verdict .outlook.warn b {
+  color: var(--warn);
+}
 
 .shape {
   display: grid;

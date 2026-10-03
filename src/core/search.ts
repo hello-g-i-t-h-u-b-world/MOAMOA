@@ -5,7 +5,6 @@ import {
   W,
   canPlace,
   collectItems,
-  place,
   placeDot,
   popcount,
   type Inventory,
@@ -29,6 +28,17 @@ export interface Plan {
   dotsUsed: number;
   finalRows: Rows;
   finalItems: Item[];
+  /** 다음 손패 미리 보기 결과 (했을 때만) */
+  outlook?: Outlook;
+}
+
+export interface Outlook {
+  /** 무작위로 뽑아 본 다음 손패 수 */
+  samples: number;
+  /** 그중 다 놓을 수 있었던 비율 */
+  completeRate: number;
+  /** 비교한 후보 수 */
+  candidates: number;
 }
 
 export interface SolveInput {
@@ -77,7 +87,7 @@ function movesOf(n: Node): Move[] {
   return out.reverse();
 }
 
-function itemValue(gained: number, dotsUsed: number, inv: Inventory, w: Weights): number {
+export function itemValue(gained: number, dotsUsed: number, inv: Inventory, w: Weights): number {
   // 보유 한도를 넘는 아이템은 획득해도 소용없다
   const room = INVENTORY_CAP - (inv.dot + inv.swap) + dotsUsed;
   return Math.min(gained, Math.max(0, room)) * w.itemGain - dotsUsed * w.dotCost;
@@ -103,6 +113,14 @@ function dotCandidates(rows: Rows): [number, number][] {
 }
 
 export function solve(input: SolveInput): Plan | null {
+  return solveTop(input, 1)[0] ?? null;
+}
+
+/**
+ * 최종 점수 상위 count개의 계획 (점수 내림차순).
+ * 다음 손패 미리 보기(lookahead.ts)에서 후보로 쓴다.
+ */
+export function solveTop(input: SolveInput, count: number): Plan[] {
   const w = input.weights ?? DEFAULT_WEIGHTS;
   const beam = input.beam ?? 150;
   const finalists = input.finalists ?? 60;
@@ -132,30 +150,45 @@ export function solve(input: SolveInput): Plan | null {
   if (fullMask === 0) finals.set(0, root);
 
   const maxSteps = popcount(fullMask) + maxDots;
+  // 단계마다 남길 수 있는 최대 수: 이보다 점수가 낮은 자식은 보드를 복사하지도 않고 버린다
+  const keep = Math.max(beam, finalists, count);
+  const scratch = new Array<number>(H).fill(0);
   for (let step = 0; step < maxSteps && frontier.length > 0; step++) {
-    const children = new Map<number, Node>();
-    const push = (parent: Node, rows: Rows, cleared: number[], remaining: number, dotsUsed: number, move: Move) => {
-      const { remaining: items, collected } = collectItems(parent.items, cleared);
-      const gained = collected.length ? parent.gained.concat(collected) : parent.gained;
-      const key = hashNode(rows, remaining, dotsUsed, gained.length);
-      const score =
-        cheapScore(cheapFeatures(rows), w) + itemValue(gained.length, dotsUsed, input.inventory, w);
+    let children = new Map<number, Node>();
+    let cut = -Infinity;
+    const prune = () => {
+      const top = [...children.values()].sort((a, b) => b.score - a.score).slice(0, keep);
+      children = new Map(top.map((n) => [hashNode(n.rows, n.remaining, n.dotsUsed, n.gained.length), n]));
+      cut = top[top.length - 1].score;
+    };
+    /** scratch에 만든 보드를 평가해 남길 만하면 자식으로 추가 */
+    const push = (parent: Node, cleared: number[], remaining: number, dotsUsed: number, makeMove: () => Move) => {
+      const nGained =
+        parent.gained.length +
+        (cleared.length && parent.items.length ? parent.items.filter((it) => cleared.includes(it.r)).length : 0);
+      const score = cheapScore(cheapFeatures(scratch), w) + itemValue(nGained, dotsUsed, input.inventory, w);
+      if (score <= cut) return;
+      const key = hashNode(scratch, remaining, dotsUsed, nGained);
       const prev = children.get(key);
       if (prev && prev.score >= score) return;
+      const { remaining: items, collected } = collectItems(parent.items, cleared);
       children.set(key, {
-        rows,
+        rows: scratch.slice(),
         items,
         remaining,
         dotsUsed,
-        gained,
+        gained: collected.length ? parent.gained.concat(collected) : parent.gained,
         lines: parent.lines + cleared.length,
         parent,
-        move,
+        move: makeMove(),
         score,
       });
+      if (children.size >= keep * 4) prune();
     };
+    const NO_CLEAR: number[] = [];
 
     for (const node of frontier) {
+      const base = node.rows;
       // 블록 배치 (같은 종류가 여러 개면 한 번만 시도)
       const triedTypes = new Set<PieceType>();
       for (let slot = 0; slot < hand.length; slot++) {
@@ -169,31 +202,42 @@ export function solve(input: SolveInput): Plan | null {
           const o = orients[oi];
           for (let r = 0; r <= H - o.h; r++) {
             for (let c = 0; c <= W - o.w; c++) {
-              if (!canPlace(node.rows, o, r, c)) continue;
-              const res = place(node.rows, o, r, c);
-              push(node, res.rows, res.cleared, remaining, node.dotsUsed, {
+              if (!canPlace(base, o, r, c)) continue;
+              // place()와 같지만 보드를 새로 만들지 않고 scratch에 쓴다
+              for (let i = 0; i < H; i++) scratch[i] = base[i];
+              let cleared = NO_CLEAR;
+              for (let i = 0; i < o.h; i++) {
+                const v = scratch[r + i] | (o.rows[i] << c);
+                if (v === FULL) {
+                  scratch[r + i] = 0;
+                  if (cleared === NO_CLEAR) cleared = [];
+                  cleared.push(r + i);
+                } else scratch[r + i] = v;
+              }
+              push(node, cleared, remaining, node.dotsUsed, () => ({
                 kind: 'piece',
                 slot,
                 type,
                 orient: oi,
                 r,
                 c,
-                cleared: res.cleared,
-              });
+                cleared,
+              }));
             }
           }
         }
       }
       // 점 찍기
       if (node.dotsUsed < maxDots) {
-        for (const [r, c] of dotCandidates(node.rows)) {
-          const res = placeDot(node.rows, r, c);
-          push(node, res.rows, res.cleared, node.remaining, node.dotsUsed + 1, {
+        for (const [r, c] of dotCandidates(base)) {
+          const res = placeDot(base, r, c);
+          for (let i = 0; i < H; i++) scratch[i] = res.rows[i];
+          push(node, res.cleared, node.remaining, node.dotsUsed + 1, () => ({
             kind: 'dot',
             r,
             c,
             cleared: res.cleared,
-          });
+          }));
         }
       }
     }
@@ -219,26 +263,20 @@ export function solve(input: SolveInput): Plan | null {
   const complete = finals.size > 0;
   const pool = complete ? [...finals.values()] : deepest;
   pool.sort((a, b) => b.score - a.score);
-  let best: Node | null = null;
-  let bestScore = -Infinity;
-  for (const n of pool.slice(0, finalists)) {
-    const s = n.score + fitScore(fitFeatures(n.rows), w) - popcount(n.remaining) * UNPLACED_PENALTY;
-    if (s > bestScore) {
-      bestScore = s;
-      best = n;
-    }
-  }
-  if (!best) return null;
-  return {
-    moves: movesOf(best),
-    score: bestScore,
-    complete: best.remaining === 0,
-    lines: best.lines,
-    itemsGained: best.gained,
-    dotsUsed: best.dotsUsed,
-    finalRows: best.rows,
-    finalItems: best.items,
-  };
+  const scored = pool
+    .slice(0, Math.max(finalists, count))
+    .map((n) => ({ n, s: n.score + fitScore(fitFeatures(n.rows), w) - popcount(n.remaining) * UNPLACED_PENALTY }));
+  scored.sort((a, b) => b.s - a.s);
+  return scored.slice(0, count).map(({ n, s }) => ({
+    moves: movesOf(n),
+    score: s,
+    complete: n.remaining === 0,
+    lines: n.lines,
+    itemsGained: n.gained,
+    dotsUsed: n.dotsUsed,
+    finalRows: n.rows,
+    finalItems: n.items,
+  }));
 }
 
 export interface SwapAdvice {

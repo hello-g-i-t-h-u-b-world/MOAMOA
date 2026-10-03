@@ -84,13 +84,30 @@ src/core/pieces.ts      블록 19종 정의, 회전/반전, 조작 안내
 src/core/board.ts       비트보드 (행마다 10비트), 배치, 가로줄 제거
 src/core/eval.ts        평가 함수 (구멍, 울퉁불퉁함, 블록별 놓을 자리, 막힌 칸 등)
 src/core/search.ts      빔 탐색 (순서 × 회전 × 위치 + 점 찍기), 바꿔 뽑기 기대값 분석
-src/core/solver.worker.ts  Web Worker에서 탐색
+src/core/lookahead.ts   다음 손패 미리 보기 (무작위 다음 손패로 후보 비교, 몬테카를로)
+src/core/pool.ts        Web Worker 여러 개에 탐색을 나눠 맡김 (CPU 코어 여러 개 사용)
+src/core/solver.worker.ts  Worker 하나가 하는 일 (후보 구하기 / 미리 보기 일부 / 바꿔 뽑기 분석)
 src/capture/capture.ts  getDisplayMedia 화면 캡처
 src/capture/recognize.ts  보드 칸 색 판별, 아이템 아이콘, 보유 조각 모양 매칭
 src/capture/tracker.ts  화면 변화로 아이템 획득/사용 자동 추적
 src/ui/main.ts          화면
 scripts/sim.ts          자가 대국 시뮬레이터 / 가중치 튜너
 ```
+
+## 계산 방식
+
+1. **빔 탐색**: 남은 조각 × 회전·반전 × 위치(+ 점 찍기)를 단계마다 모두 만들어 보고, 빠른 평가 점수 상위만 남겨 다음 조각으로 넘어갑니다.
+   순서도 자동으로 탐색합니다. 최종 후보는 '블록 종류별로 아직 놓을 자리가 있는지' 등으로 정밀 평가합니다.
+2. **다음 손패 미리 보기**: 상위 후보(보통 12개)마다 무작위 다음 손패(보통 48가지)를 실제로 놓아 보고,
+   평균이 가장 좋은 후보를 고릅니다. 추천 순서 아래에 '다음 손패를 다 놓을 수 있는 비율'이 표시됩니다.
+3. **여러 코어 사용**: 미리 보기는 Web Worker 여러 개(코어 수 − 2, 최대 8)에 나눠 계산합니다.
+
+자가 대국 비교 (24판, 판당 최대 300턴, 같은 시드):
+
+| | 평균 생존 턴 | 게임오버 |
+|---|---|---|
+| 미리 보기 없음 | 240.3 | 9 / 24판 |
+| 미리 보기 (보통) | 300.0 | 0 / 24판 |
 
 ## 규칙 가정
 
@@ -109,6 +126,8 @@ scripts/sim.ts          자가 대국 시뮬레이터 / 가중치 튜너
 ```bash
 npm test                                   # 단위 테스트 + 실제 스크린샷 인식 테스트
 npm run sim -- --games 10 --beam 60        # 자가 대국으로 평균 생존 턴 측정
+npm run sim -- --games 24 --turns 300 --beam 150 --look normal --jobs 8   # 미리 보기 켜고 8개 프로세스로 나눠 측정
+npx tsx scripts/bench-lookahead.ts         # 미리 보기 속도 측정
 npm run sim -- --tune 30 --games 10 --swap 0   # 평가 가중치 튜닝
 npx tsx scripts/robustness.ts              # 영역 어긋남·배율·영상 변환에 대한 인식 견고성 실험
 npx tsx scripts/digit-robustness.ts        # 보유 능력 숫자 인식의 배율 견고성 실험

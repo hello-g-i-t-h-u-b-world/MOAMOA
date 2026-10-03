@@ -1,37 +1,58 @@
 /// <reference lib="webworker" />
-import { analyzeSwaps, solve, type Plan, type SolveInput, type SwapAdvice } from './search';
+// 탐색 Worker. pool.ts가 여러 개를 띄워 작업을 나눠 맡긴다.
+import { lookaheadCandidates, lookaheadTotals, type LookaheadOptions, type LookaheadTotals, type NextState } from './lookahead';
+import type { PieceType } from './pieces';
+import { analyzeSwaps, solveTop, type Plan, type SolveInput, type SwapAdvice } from './search';
 
-export interface SolveRequest {
-  id: number;
-  input: SolveInput;
-  /** 계획은 그대로 두고 바꿔 뽑기 분석만 (추천 고정 중 바꿔 뽑기 개수가 바뀐 경우) */
-  swapsOnly?: boolean;
+export type WorkerTask =
+  /** 이번 손패의 계획 후보 (look이 없으면 1등 하나만) */
+  | { kind: 'candidates'; input: SolveInput; look: LookaheadOptions | null }
+  /** 후보 상태들에 다음 손패 일부를 계산해 점수 합을 낸다 */
+  | {
+      kind: 'lookahead';
+      states: NextState[];
+      hands: PieceType[][];
+      base: Pick<SolveInput, 'weights' | 'maxDots'>;
+      opts: Pick<LookaheadOptions, 'beam' | 'finalists'>;
+    }
+  /** 바꿔 뽑기 분석 */
+  | { kind: 'swaps'; input: SolveInput };
+
+export type WorkerResult =
+  | { kind: 'candidates'; plans: Plan[] }
+  | { kind: 'lookahead'; result: LookaheadTotals }
+  | { kind: 'swaps'; swaps: SwapAdvice[] };
+
+export interface WorkerRequest {
+  taskId: number;
+  task: WorkerTask;
 }
 
-export type SolveResponse =
-  | { id: number; kind: 'plan'; plan: Plan | null; ms: number }
-  | { id: number; kind: 'swaps'; swaps: SwapAdvice[]; ms: number };
+export interface WorkerResponse {
+  taskId: number;
+  result?: WorkerResult;
+  error?: string;
+}
 
-let latest = 0;
-
-self.onmessage = (e: MessageEvent<SolveRequest>) => {
-  const { id, input, swapsOnly } = e.data;
-  latest = id;
-  if (swapsOnly) {
-    const t1 = performance.now();
-    self.postMessage({ id, kind: 'swaps', swaps: analyzeSwaps(input), ms: performance.now() - t1 } satisfies SolveResponse);
-    return;
+function run(task: WorkerTask): WorkerResult {
+  switch (task.kind) {
+    case 'candidates':
+      return {
+        kind: 'candidates',
+        plans: task.look ? lookaheadCandidates(task.input, task.look) : solveTop(task.input, 1),
+      };
+    case 'lookahead':
+      return { kind: 'lookahead', result: lookaheadTotals(task.states, task.hands, task.base, task.opts) };
+    case 'swaps':
+      return { kind: 'swaps', swaps: analyzeSwaps(task.input) };
   }
-  const t0 = performance.now();
-  const plan = solve(input);
-  self.postMessage({ id, kind: 'plan', plan, ms: performance.now() - t0 } satisfies SolveResponse);
-  // 바꿔 뽑기 분석은 오래 걸리므로 계획을 먼저 보낸 뒤 이어서 계산한다
-  if (input.inventory.swap > 0) {
-    setTimeout(() => {
-      if (id !== latest) return; // 새 요청이 들어왔으면 생략
-      const t1 = performance.now();
-      const swaps = analyzeSwaps(input);
-      self.postMessage({ id, kind: 'swaps', swaps, ms: performance.now() - t1 } satisfies SolveResponse);
-    }, 0);
+}
+
+self.onmessage = (e: MessageEvent<WorkerRequest>) => {
+  const { taskId, task } = e.data;
+  try {
+    self.postMessage({ taskId, result: run(task) } satisfies WorkerResponse);
+  } catch (err) {
+    self.postMessage({ taskId, error: String(err) } satisfies WorkerResponse);
   }
 };

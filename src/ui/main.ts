@@ -14,7 +14,8 @@ import {
 import { PIECES, PIECE_TYPES, transformSteps, type Orientation, type PieceType } from '../core/pieces';
 import { DEFAULT_WEIGHTS } from '../core/eval';
 import type { Move, Plan, SolveInput, SwapAdvice } from '../core/search';
-import type { SolveRequest, SolveResponse } from '../core/solver.worker';
+import { LOOKAHEAD_PRESETS } from '../core/lookahead';
+import { Cancelled, SolverPool } from '../core/pool';
 import { ScreenCapture } from '../capture/capture';
 import { learnedOnly, makeExport } from '../capture/digit-data';
 import { checkProgress, type ProgressResult } from '../core/progress';
@@ -211,17 +212,22 @@ function setStatus(msg: string, kind: 'idle' | 'busy' | 'ok' | 'warn' = 'idle') 
   el.dataset.kind = kind;
 }
 
-// ───────────── 탐색 (Web Worker) ─────────────
+// ───────────── 탐색 (Web Worker 여러 개) ─────────────
 
-const worker = new Worker(new URL('../core/solver.worker.ts', import.meta.url), { type: 'module' });
+const pool = new SolverPool();
 let reqId = 0;
 
 let lockAfterSolve = false;
 
+function effortSetting() {
+  const key = ($('effort') as HTMLSelectElement).value as keyof typeof EFFORT;
+  return { search: EFFORT[key], look: LOOKAHEAD_PRESETS[key] };
+}
+
 function requestSolve(fromScreen = false) {
   lockAfterSolve = fromScreen && state.lockEnabled;
   state.locked = false;
-  const effort = EFFORT[($('effort') as HTMLSelectElement).value as keyof typeof EFFORT];
+  const effort = effortSetting();
   const input: SolveInput = {
     // 꽉 찬 줄은 게임에서 바로 지워지므로 빈 줄로 넘긴다
     rows: withoutFullRows(state.rows),
@@ -230,7 +236,7 @@ function requestSolve(fromScreen = false) {
     inventory: { ...state.inventory },
     weights: DEFAULT_WEIGHTS,
     maxDots: 2,
-    ...effort,
+    ...effort.search,
   };
   state.swaps = null;
   if (input.hand.every((h) => h === null)) {
@@ -243,13 +249,53 @@ function requestSolve(fromScreen = false) {
   const id = ++reqId;
   planReqId = id;
   swapReqId = id;
-  pendingPlanBase = { rows: input.rows.slice(), used: state.hand.map((s) => s.used) };
-  worker.postMessage({ id, input } satisfies SolveRequest);
+  const base = { rows: input.rows.slice(), used: state.hand.map((s) => s.used) };
+  const t0 = performance.now();
+  pool
+    .plan(input, effort.look, (cands, samples) => {
+      if (id === planReqId) setStatus(`계산 중… 후보 ${cands}개로 다음 손패 ${samples}가지 미리 보는 중 (코어 ${pool.size}개)`, 'busy');
+    })
+    .then((plan) => {
+      if (id !== planReqId) return;
+      onPlan(plan, performance.now() - t0, base);
+    })
+    .catch(onSolveError);
+  if (input.inventory.swap > 0) runSwapAnalysis(id, input);
 }
 
 let planReqId = 0;
 let swapReqId = 0;
-let pendingPlanBase: { rows: Rows; used: boolean[] } | null = null;
+
+function onSolveError(err: unknown) {
+  if (err instanceof Cancelled) return;
+  console.error(err);
+  setStatus(`계산 오류: ${String(err)}`, 'warn');
+}
+
+function onPlan(plan: Plan | null, ms: number, base: { rows: Rows; used: boolean[] }) {
+  state.plan = plan;
+  state.solveMs = ms;
+  state.planBase = base;
+  // 1단계부터 바로 보여준다
+  state.step = 0;
+  state.view = plan?.moves.length ? 0 : 'all';
+  state.locked = lockAfterSolve && !!plan;
+  newDrops.clear();
+  if (state.locked) setStatus(`🔒 추천 고정 (${ms.toFixed(0)}ms) · 다음 블록을 받으면 다시 계산`, 'ok');
+  else setStatus(`계산 완료 (${ms.toFixed(0)}ms)`, plan?.complete === false ? 'warn' : 'ok');
+  renderAll();
+}
+
+function runSwapAnalysis(id: number, input: SolveInput) {
+  pool
+    .swaps(input)
+    .then((swaps) => {
+      if (id !== swapReqId) return;
+      state.swaps = swaps;
+      renderAll();
+    })
+    .catch(onSolveError);
+}
 
 /**
  * 계획은 그대로 두고 바꿔 뽑기 분석만 다시 한다 (추천 고정 중 바꿔 뽑기를 얻은 경우 등).
@@ -263,7 +309,6 @@ function requestSwapAnalysis() {
     return;
   }
   const src = source && live.hand.length ? live : state;
-  const effort = EFFORT[($('effort') as HTMLSelectElement).value as keyof typeof EFFORT];
   const input: SolveInput = {
     rows: withoutFullRows(src.rows),
     hand: src.hand.map((s) => (s.used ? null : s.type)),
@@ -271,34 +316,14 @@ function requestSwapAnalysis() {
     inventory: { ...state.inventory },
     weights: DEFAULT_WEIGHTS,
     maxDots: 2,
-    ...effort,
+    ...effortSetting().search,
   };
   if (input.hand.every((h) => h === null)) return;
   const id = ++reqId;
   swapReqId = id;
   renderSwapAdvice();
-  worker.postMessage({ id, input, swapsOnly: true } satisfies SolveRequest);
+  runSwapAnalysis(id, input);
 }
-
-worker.onmessage = (e: MessageEvent<SolveResponse>) => {
-  const res = e.data;
-  if (res.id !== (res.kind === 'plan' ? planReqId : swapReqId)) return;
-  if (res.kind === 'plan') {
-    state.plan = res.plan;
-    state.solveMs = res.ms;
-    state.planBase = pendingPlanBase;
-    // 1단계부터 바로 보여준다
-    state.step = 0;
-    state.view = res.plan?.moves.length ? 0 : 'all';
-    state.locked = lockAfterSolve && !!res.plan;
-    newDrops.clear();
-    if (state.locked) setStatus(`🔒 추천 고정 (${res.ms.toFixed(0)}ms) · 다음 블록을 받으면 다시 계산`, 'ok');
-    else setStatus(`계산 완료 (${res.ms.toFixed(0)}ms)`, res.plan?.complete === false ? 'warn' : 'ok');
-  } else {
-    state.swaps = res.swaps;
-  }
-  renderAll();
-};
 
 // ───────────── 렌더링 ─────────────
 
@@ -553,6 +578,13 @@ function renderMoves() {
   lines.push(
     `<p class="muted">줄 제거 ${plan.lines} · 아이템 획득 ${plan.itemsGained.length} · 평가 ${plan.score.toFixed(1)} · ${state.solveMs.toFixed(0)}ms</p>`,
   );
+  const o = plan.outlook;
+  if (o) {
+    const pct = Math.round(o.completeRate * 100);
+    lines.push(
+      `<p class="outlook ${pct < 80 ? 'warn' : ''}">다음 손패 미리 보기: 무작위 ${o.samples}가지 중 <b>${pct}%</b>는 3개 다 놓을 수 있음 <span class="muted">(후보 ${o.candidates}개 비교)</span></p>`,
+    );
+  }
   verdict.innerHTML = lines.join('');
 }
 
