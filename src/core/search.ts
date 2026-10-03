@@ -39,6 +39,8 @@ export interface Outlook {
   completeRate: number;
   /** 비교한 후보 수 */
   candidates: number;
+  /** 두 손패 앞까지 본 경우: 다음 손패와 그다음 손패를 연달아 다 놓을 수 있었던 비율 */
+  twoStepRate?: number;
 }
 
 export interface SolveInput {

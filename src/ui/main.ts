@@ -77,6 +77,7 @@ const EFFORT = {
   fast: { beam: 60, finalists: 30 },
   normal: { beam: 150, finalists: 60 },
   deep: { beam: 400, finalists: 150 },
+  max: { beam: 400, finalists: 150 },
 } as const;
 
 const state = {
@@ -252,8 +253,9 @@ function requestSolve(fromScreen = false) {
   const base = { rows: input.rows.slice(), used: state.hand.map((s) => s.used) };
   const t0 = performance.now();
   pool
-    .plan(input, effort.look, (cands, samples) => {
-      if (id === planReqId) setStatus(`계산 중… 후보 ${cands}개로 다음 손패 ${samples}가지 미리 보는 중 (코어 ${pool.size}개)`, 'busy');
+    .plan(input, effort.look, (p) => {
+      if (id === planReqId)
+        setStatus(`계산 중… [${p.stage}] 후보 ${p.candidates}개 × 다음 손패 ${p.samples}가지 미리 보는 중 (코어 ${pool.size}개)`, 'busy');
     })
     .then((plan) => {
       if (id !== planReqId) return;
@@ -584,6 +586,10 @@ function renderMoves() {
     lines.push(
       `<p class="outlook ${pct < 80 ? 'warn' : ''}">다음 손패 미리 보기: 무작위 ${o.samples}가지 중 <b>${pct}%</b>는 3개 다 놓을 수 있음 <span class="muted">(후보 ${o.candidates}개 비교)</span></p>`,
     );
+    if (o.twoStepRate !== undefined) {
+      const p2 = Math.round(o.twoStepRate * 100);
+      lines.push(`<p class="outlook ${p2 < 70 ? 'warn' : ''}">두 손패 앞까지: 다음 손패와 그다음 손패를 연달아 다 놓을 확률 <b>${p2}%</b></p>`);
+    }
   }
   verdict.innerHTML = lines.join('');
 }

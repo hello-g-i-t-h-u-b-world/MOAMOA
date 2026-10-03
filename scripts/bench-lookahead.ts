@@ -14,7 +14,7 @@ for (const [name, rows] of [['empty', emptyRows()], ['mid', mid]] as const) {
   console.log(name, 'base', (performance.now() - t).toFixed(0) + 'ms', base?.score.toFixed(1));
   for (const [preset, opts] of Object.entries(LOOKAHEAD_PRESETS)) {
     t = performance.now();
-    const plan = solveWithLookahead({ ...input, hand: [...input.hand] }, opts);
+    const plan = await solveWithLookahead({ ...input, hand: [...input.hand] }, opts);
     const same = JSON.stringify(plan?.finalRows) === JSON.stringify(base?.finalRows);
     console.log(name, preset, (performance.now() - t).toFixed(0) + 'ms', plan?.outlook, same ? '(같은 수)' : '(다른 수)');
   }

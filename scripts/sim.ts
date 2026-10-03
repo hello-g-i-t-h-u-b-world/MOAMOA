@@ -49,7 +49,7 @@ interface GameResult {
   swapsUsed: number;
 }
 
-function playGame(seed: number, w: Weights): GameResult {
+async function playGame(seed: number, w: Weights): Promise<GameResult> {
   const rand = rng(seed);
   const pick = (): PieceType => PIECE_TYPES[Math.floor(rand() * PIECE_TYPES.length)];
   let rows: Rows = emptyRows();
@@ -70,7 +70,7 @@ function playGame(seed: number, w: Weights): GameResult {
             seed: seed * 7919 + turn,
           });
     const input = () => ({ rows, hand, items, inventory: inv, weights: w, beam: BEAM, finalists: FINALISTS, maxDots: 2 });
-    let plan = choose(input());
+    let plan = await choose(input());
     // 바꿔 뽑기: 기대 이득이 비용보다 크면 사용 (여러 번 가능)
     while (USE_SWAP && inv.swap > 0 && plan) {
       const adv = analyzeSwaps(input());
@@ -79,7 +79,7 @@ function playGame(seed: number, w: Weights): GameResult {
       hand[top.slot] = pick();
       inv.swap--;
       swapsUsed++;
-      plan = choose(input());
+      plan = await choose(input());
     }
     if (!plan || !plan.complete) return { seed, turns: turn, lines, dotsUsed, swapsUsed };
 
@@ -107,8 +107,9 @@ function playGame(seed: number, w: Weights): GameResult {
   return { seed, turns: MAX_TURNS, lines, dotsUsed, swapsUsed };
 }
 
-function evaluate(w: Weights, seeds: number[]): { mean: number; results: GameResult[] } {
-  const results = seeds.map((s) => playGame(s, w));
+async function evaluate(w: Weights, seeds: number[]): Promise<{ mean: number; results: GameResult[] }> {
+  const results: GameResult[] = [];
+  for (const s of seeds) results.push(await playGame(s, w));
   return { mean: results.reduce((a, r) => a + r.turns, 0) / results.length, results };
 }
 
@@ -138,10 +139,10 @@ async function runParallel(): Promise<GameResult[]> {
 }
 
 if (arg('child', 0)) {
-  for (const s of seeds) process.send!(playGame(s, DEFAULT_WEIGHTS));
+  for (const s of seeds) process.send!(await playGame(s, DEFAULT_WEIGHTS));
 } else if (!TUNE) {
   const t = performance.now();
-  const results = JOBS > 1 ? await runParallel() : evaluate(DEFAULT_WEIGHTS, seeds).results;
+  const results = JOBS > 1 ? await runParallel() : (await evaluate(DEFAULT_WEIGHTS, seeds)).results;
   if (JOBS <= 1) for (const r of results) console.log(JSON.stringify(r));
   const mean = results.reduce((a, r) => a + r.turns, 0) / results.length;
   const died = results.filter((r) => r.turns < MAX_TURNS).length;
@@ -155,13 +156,13 @@ if (arg('child', 0)) {
   // 간단한 무작위 언덕 오르기
   const rand = rng(42);
   let best: Weights = { ...DEFAULT_WEIGHTS };
-  let bestMean = evaluate(best, seeds).mean;
+  let bestMean = (await evaluate(best, seeds)).mean;
   console.log('start', bestMean);
   const keys = Object.keys(best) as (keyof Weights)[];
   for (let it = 0; it < TUNE; it++) {
     const cand = { ...best };
     for (const k of keys) if (rand() < 0.4) cand[k] = +(cand[k] * (0.6 + rand() * 0.8)).toFixed(3);
-    const m = evaluate(cand, seeds).mean;
+    const m = (await evaluate(cand, seeds)).mean;
     console.log(it, m.toFixed(1), m > bestMean ? '★' : '');
     if (m > bestMean) {
       bestMean = m;

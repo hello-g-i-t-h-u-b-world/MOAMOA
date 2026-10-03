@@ -1,6 +1,16 @@
 /// <reference lib="webworker" />
 // 탐색 Worker. pool.ts가 여러 개를 띄워 작업을 나눠 맡긴다.
-import { lookaheadCandidates, lookaheadTotals, type LookaheadOptions, type LookaheadTotals, type NextState } from './lookahead';
+import {
+  lookahead2Totals,
+  lookaheadCandidates,
+  lookaheadTotals,
+  type InnerOptions,
+  type Lookahead2Totals,
+  type LookaheadBase,
+  type LookaheadOptions,
+  type LookaheadTotals,
+  type NextState,
+} from './lookahead';
 import type { PieceType } from './pieces';
 import { analyzeSwaps, solveTop, type Plan, type SolveInput, type SwapAdvice } from './search';
 
@@ -8,12 +18,15 @@ export type WorkerTask =
   /** 이번 손패의 계획 후보 (look이 없으면 1등 하나만) */
   | { kind: 'candidates'; input: SolveInput; look: LookaheadOptions | null }
   /** 후보 상태들에 다음 손패 일부를 계산해 점수 합을 낸다 */
+  | { kind: 'lookahead'; states: NextState[]; hands: PieceType[][]; base: LookaheadBase; opts: InnerOptions }
+  /** 두 손패 앞까지: 다음 손패 일부(hands1) × 그다음 손패 전부(hands2) */
   | {
-      kind: 'lookahead';
+      kind: 'lookahead2';
       states: NextState[];
-      hands: PieceType[][];
-      base: Pick<SolveInput, 'weights' | 'maxDots'>;
-      opts: Pick<LookaheadOptions, 'beam' | 'finalists'>;
+      hands1: PieceType[][];
+      hands2: PieceType[][];
+      base: LookaheadBase;
+      opts: InnerOptions;
     }
   /** 바꿔 뽑기 분석 */
   | { kind: 'swaps'; input: SolveInput };
@@ -21,6 +34,7 @@ export type WorkerTask =
 export type WorkerResult =
   | { kind: 'candidates'; plans: Plan[] }
   | { kind: 'lookahead'; result: LookaheadTotals }
+  | { kind: 'lookahead2'; result: Lookahead2Totals }
   | { kind: 'swaps'; swaps: SwapAdvice[] };
 
 export interface WorkerRequest {
@@ -43,6 +57,11 @@ function run(task: WorkerTask): WorkerResult {
       };
     case 'lookahead':
       return { kind: 'lookahead', result: lookaheadTotals(task.states, task.hands, task.base, task.opts) };
+    case 'lookahead2':
+      return {
+        kind: 'lookahead2',
+        result: lookahead2Totals(task.states, task.hands1, task.hands2, task.base, task.opts),
+      };
     case 'swaps':
       return { kind: 'swaps', swaps: analyzeSwaps(task.input) };
   }

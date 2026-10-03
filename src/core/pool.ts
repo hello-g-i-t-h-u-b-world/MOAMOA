@@ -1,7 +1,18 @@
 // 탐색 Worker 여러 개에 작업을 나눠 맡긴다 (CPU 코어를 여러 개 쓰기 위해).
-//   계획: 후보 구하기(Worker 1개) → 다음 손패 미리 보기(손패를 나눠 Worker 전부) → 합쳐서 고르기
-import { chooseByLookahead, sampleHands, stateAfter, type LookaheadOptions, type LookaheadTotals } from './lookahead';
-import type { Rows } from './board';
+//   계획: 후보 구하기(Worker 1개) → 다음 손패 미리 보기(손패를 나눠 Worker 여럿) → 합쳐서 고르기
+// Worker는 필요할 때 만들고, 동시에 일하는 수는 설정(보통: 코어 수 - 2 / 최고: 코어 수 - 1)으로 제한한다.
+import {
+  runLookahead,
+  type InnerOptions,
+  type Lookahead2Totals,
+  type LookaheadBase,
+  type LookaheadOptions,
+  type LookaheadPhase,
+  type LookaheadRunner,
+  type LookaheadTotals,
+  type NextState,
+} from './lookahead';
+import type { PieceType } from './pieces';
 import type { Plan, SolveInput, SwapAdvice } from './search';
 import type { WorkerRequest, WorkerResponse, WorkerResult, WorkerTask } from './solver.worker';
 
@@ -12,10 +23,18 @@ export class Cancelled extends Error {
   }
 }
 
-/** 화면을 그리고 게임을 돌릴 코어는 남겨 둔다 */
+function cores(): number {
+  return typeof navigator !== 'undefined' ? navigator.hardwareConcurrency || 2 : 2;
+}
+
+/** 기본: 화면을 그리고 게임을 돌릴 코어는 남겨 둔다 */
 export function defaultPoolSize(): number {
-  const n = typeof navigator !== 'undefined' ? navigator.hardwareConcurrency || 2 : 2;
-  return Math.max(1, Math.min(8, n - 2));
+  return Math.max(1, Math.min(8, cores() - 2));
+}
+
+/** '최고' 설정: 코어를 하나만 남기고 전부 */
+export function maxPoolSize(): number {
+  return Math.max(1, Math.min(32, cores() - 1));
 }
 
 type Tag = 'plan' | 'swaps';
@@ -28,40 +47,47 @@ interface Job {
   reject: (e: Error) => void;
 }
 
-/** 같은 보드·손패면 같은 다음 손패를 뽑아 '다시 계산'해도 같은 결과가 나오게 한다 */
-function seedOf(rows: Rows, hand: SolveInput['hand']): number {
-  let h = 0x811c9dc5;
-  for (const r of rows) h = Math.imul(h ^ r, 0x01000193);
-  for (const p of hand) h = Math.imul(h ^ (p ? p.charCodeAt(0) : 0), 0x01000193);
-  return h >>> 0;
+interface Slot {
+  w: Worker;
+  job: Job | null;
+}
+
+/** 배열을 k개로 고르게 나눈다 */
+function split<T>(items: readonly T[], k: number): T[][] {
+  const n = Math.max(1, Math.min(items.length, k));
+  return Array.from({ length: n }, (_, i) => items.filter((_, j) => j % n === i));
 }
 
 export class SolverPool {
-  private readonly workers: { w: Worker; job: Job | null }[];
+  private readonly workers: Slot[] = [];
   private queue: Job[] = [];
   private nextTaskId = 1;
+  /** 동시에 일하는 Worker 수 상한 */
+  private limit = defaultPoolSize();
 
-  constructor(size = defaultPoolSize()) {
-    this.workers = Array.from({ length: size }, () => {
-      const slot = {
-        w: new Worker(new URL('./solver.worker.ts', import.meta.url), { type: 'module' }),
-        job: null as Job | null,
-      };
-      slot.w.onmessage = (e: MessageEvent<WorkerResponse>) => {
-        const job = slot.job;
-        slot.job = null;
-        if (job && job.taskId === e.data.taskId) {
-          if (e.data.result) job.resolve(e.data.result);
-          else job.reject(new Error(e.data.error ?? 'worker error'));
-        }
-        this.pump();
-      };
-      return slot;
-    });
+  constructor(private readonly maxSize = maxPoolSize()) {}
+
+  /** 지금 설정에서 동시에 쓰는 Worker(코어) 수 */
+  get size(): number {
+    return Math.min(this.limit, this.maxSize);
   }
 
-  get size(): number {
-    return this.workers.length;
+  private spawn(): Slot {
+    const slot: Slot = {
+      w: new Worker(new URL('./solver.worker.ts', import.meta.url), { type: 'module' }),
+      job: null,
+    };
+    slot.w.onmessage = (e: MessageEvent<WorkerResponse>) => {
+      const job = slot.job;
+      slot.job = null;
+      if (job && job.taskId === e.data.taskId) {
+        if (e.data.result) job.resolve(e.data.result);
+        else job.reject(new Error(e.data.error ?? 'worker error'));
+      }
+      this.pump();
+    };
+    this.workers.push(slot);
+    return slot;
   }
 
   /** 아직 시작하지 않은 작업을 취소한다 (이미 계산 중인 작업은 끝까지 돈다) */
@@ -79,55 +105,60 @@ export class SolverPool {
   }
 
   private pump() {
-    for (const slot of this.workers) {
-      if (slot.job || !this.queue.length) continue;
+    while (this.queue.length) {
+      const busy = this.workers.filter((s) => s.job).length;
+      if (busy >= this.size) return;
+      const slot = this.workers.find((s) => !s.job) ?? (this.workers.length < this.maxSize ? this.spawn() : null);
+      if (!slot) return;
       const job = this.queue.shift()!;
       slot.job = job;
       slot.w.postMessage({ taskId: job.taskId, task: job.task } satisfies WorkerRequest);
     }
   }
 
+  /** 미리 보기 계산을 Worker들에 나눠 맡기는 runner (코어마다 속도가 달라도 고르게 끝나도록 잘게 나눈다) */
+  private runner(): LookaheadRunner {
+    const sum = <T extends LookaheadTotals>(parts: WorkerResult[], kind: 'lookahead' | 'lookahead2', n: number): T => {
+      const acc = { totals: Array(n).fill(0), completes: Array(n).fill(0), pairCompletes: Array(n).fill(0) };
+      for (const p of parts) {
+        if (p.kind !== kind) continue;
+        const r = p.result as Partial<Lookahead2Totals> & LookaheadTotals;
+        r.totals.forEach((v, i) => (acc.totals[i] += v));
+        r.completes.forEach((v, i) => (acc.completes[i] += v));
+        r.pairCompletes?.forEach((v, i) => (acc.pairCompletes[i] += v));
+      }
+      return acc as unknown as T;
+    };
+    return {
+      totals: async (states: NextState[], hands: PieceType[][], base: LookaheadBase, opts: InnerOptions) => {
+        const parts = await Promise.all(
+          split(hands, this.size * 3).map((h) => this.run({ kind: 'lookahead', states, hands: h, base, opts }, 'plan')),
+        );
+        return sum<LookaheadTotals>(parts, 'lookahead', states.length);
+      },
+      totals2: async (states, hands1, hands2, base, opts) => {
+        const parts = await Promise.all(
+          split(hands1, this.size * 3).map((h) =>
+            this.run({ kind: 'lookahead2', states, hands1: h, hands2, base, opts }, 'plan'),
+          ),
+        );
+        return sum<Lookahead2Totals>(parts, 'lookahead2', states.length);
+      },
+    };
+  }
+
   /**
    * 최적 계획. look이 있으면 다음 손패를 미리 보고 고른다.
-   * onPhase: 미리 보기를 시작할 때 (후보 수, 다음 손패 수) 알림
+   * onPhase: 미리 보기 단계가 바뀔 때 알림
    */
-  async plan(
-    input: SolveInput,
-    look: LookaheadOptions | null,
-    onPhase?: (candidates: number, samples: number) => void,
-  ): Promise<Plan | null> {
+  async plan(input: SolveInput, look: LookaheadOptions | null, onPhase?: (p: LookaheadPhase) => void): Promise<Plan | null> {
     this.cancel('plan');
+    this.limit = look?.allCores ? this.maxSize : defaultPoolSize();
     const res = await this.run({ kind: 'candidates', input, look }, 'plan');
     if (res.kind !== 'candidates') throw new Error('unexpected result');
     const plans = res.plans;
-    if (!look || look.candidates <= 1 || look.samples <= 0 || plans.length <= 1) return plans[0] ?? null;
-
-    onPhase?.(plans.length, look.samples);
-    const hands = sampleHands(look.samples, look.seed ?? seedOf(input.rows, input.hand));
-    const states = plans.map((p) => stateAfter(input, p));
-    // 코어마다 속도가 달라도 고르게 끝나도록 Worker 수보다 잘게 나눈다
-    const chunks = Math.min(hands.length, this.size * 3);
-    const parts = await Promise.all(
-      Array.from({ length: chunks }, (_, i) =>
-        this.run(
-          {
-            kind: 'lookahead',
-            states,
-            hands: hands.filter((_, k) => k % chunks === i),
-            base: { weights: input.weights, maxDots: input.maxDots },
-            opts: { beam: look.beam, finalists: look.finalists },
-          },
-          'plan',
-        ),
-      ),
-    );
-    const sum: LookaheadTotals = { totals: plans.map(() => 0), completes: plans.map(() => 0) };
-    for (const p of parts) {
-      if (p.kind !== 'lookahead') continue;
-      p.result.totals.forEach((v, i) => (sum.totals[i] += v));
-      p.result.completes.forEach((v, i) => (sum.completes[i] += v));
-    }
-    return chooseByLookahead(input, plans, sum, hands.length);
+    if (!look || plans.length <= 1) return plans[0] ?? null;
+    return runLookahead(input, plans, look, this.runner(), onPhase);
   }
 
   async swaps(input: SolveInput): Promise<SwapAdvice[]> {
