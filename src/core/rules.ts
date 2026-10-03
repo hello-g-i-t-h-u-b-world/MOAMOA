@@ -1,5 +1,6 @@
 // 게임 규칙 (게임 안내 화면 기준): 단계별 조각 등장 확률, 능력 등장 확률, 점수
-import { PIECES, PIECE_TYPES, type PieceType } from './pieces';
+import { PIECE_TYPES, type PieceType } from './pieces';
+import pieceStats from './piece-stats.json';
 
 // ───────────── 단계 ─────────────
 
@@ -15,33 +16,43 @@ export function stageOf(lines: number): number {
 export const STAGE_RANGES = ['0~30줄', '31~60줄', '61~100줄', '101~150줄', '151줄~'] as const;
 
 /**
- * 단계별 조각 등장 확률.
- * 게임 안내: "단계가 올라갈수록 칸수가 적은 조각이 덜 등장한다" — 정확한 값은 공개되지 않아
- * 가정값을 쓴다: 1단계는 균등, 이후 단계는 (칸 수)^γ에 비례 (γ = 0, 0.25, 0.5, 0.75, 1).
- * 실제 플레이에서 관측한 조각 통계가 모이면 이 표를 실제 값으로 바꾼다.
+ * 단계별 조각 등장 확률 — 실제 플레이에서 받은 조각을 센 통계(piece-stats.json)로 추정한다.
+ * 게임 안내는 "단계가 오를수록 칸 수가 적은 조각이 덜 나온다"고만 하고 값은 공개하지 않는다.
+ * 관측 결과 같은 칸 수끼리도 빈도가 크게 달라(예: 5단계 ㄹ 13%, ㅁ 8%, ㅂ 2%) 조각마다 따로 추정한다.
+ *
+ * 단계마다 표본 수가 달라서(5단계가 대부분) 표본이 적은 단계는 전체 단계를 합친 분포 쪽으로 당긴다:
+ *   p(조각) ∝ 그 단계에서 센 수 + PRIOR_WEIGHT × 전체 합친 비율 + 0.5
+ * 통계가 더 모이면 scripts/merge-digits.ts --write로 piece-stats.json에 더하기만 하면 된다.
  */
-let STAGE_GAMMA = [0, 0.25, 0.5, 0.75, 1];
-
-/** 시뮬레이터 실험용: 단계별 γ를 바꾼다 */
-export function setStageGamma(g: number[]) {
-  STAGE_GAMMA = g.slice(0, 5);
-  probCache.clear();
-}
+const PRIOR_WEIGHT = 30;
 
 export type PieceProbs = Record<PieceType, number>;
-const probCache = new Map<number, PieceProbs>();
+type Counts = Record<string, Record<string, number>>;
+
+function estimate(stats: Counts): PieceProbs[] {
+  const pooled = PIECE_TYPES.map((t) => Object.values(stats).reduce((a, st) => a + (st[t] ?? 0), 0));
+  const pooledSum = pooled.reduce((a, b) => a + b, 0);
+  const out: PieceProbs[] = [];
+  for (let s = 1; s <= 5; s++) {
+    const st = stats[String(s)] ?? {};
+    const w = PIECE_TYPES.map(
+      (t, i) => (st[t] ?? 0) + (pooledSum ? (PRIOR_WEIGHT * pooled[i]) / pooledSum : PRIOR_WEIGHT / PIECE_TYPES.length) + 0.5,
+    );
+    const sum = w.reduce((a, b) => a + b, 0);
+    out.push(Object.fromEntries(PIECE_TYPES.map((t, i) => [t, w[i] / sum])) as PieceProbs);
+  }
+  return out;
+}
+
+let table = estimate(pieceStats as Counts);
+
+/** 시뮬레이터 실험용: 다른 통계(또는 {} = 모든 조각 균등)로 바꾼다 */
+export function setPieceStats(stats: Counts) {
+  table = estimate(stats);
+}
 
 export function pieceProbs(stage = 1): PieceProbs {
-  const s = Math.max(1, Math.min(5, Math.round(stage)));
-  let p = probCache.get(s);
-  if (!p) {
-    const g = STAGE_GAMMA[s - 1];
-    const raw = PIECE_TYPES.map((t) => Math.pow(PIECES[t].size, g));
-    const sum = raw.reduce((a, b) => a + b, 0);
-    p = Object.fromEntries(PIECE_TYPES.map((t, i) => [t, raw[i] / sum])) as PieceProbs;
-    probCache.set(s, p);
-  }
-  return p;
+  return table[Math.max(1, Math.min(5, Math.round(stage))) - 1];
 }
 
 /** 0~1 난수로 조각 하나를 뽑는다 */

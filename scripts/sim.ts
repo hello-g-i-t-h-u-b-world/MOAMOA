@@ -6,7 +6,7 @@ import { fork } from 'node:child_process';
 import { BOARD_ITEM_CAP, DROP_EVERY, H, INVENTORY_CAP, W, emptyRows, isFilled, type Inventory, type Item, type Rows } from '../src/core/board';
 import { DEFAULT_WEIGHTS, type Weights } from '../src/core/eval';
 import type { PieceType } from '../src/core/pieces';
-import { DOT_PROB, pickPiece, pieceProbs, setStageGamma, stageOf } from '../src/core/rules';
+import { DOT_PROB, pickPiece, pieceProbs, setPieceStats, stageOf } from '../src/core/rules';
 import { LOOKAHEAD_PRESETS, solveWithLookahead } from '../src/core/lookahead';
 import { analyzeSwaps, solve, type SolveInput } from '../src/core/search';
 
@@ -28,8 +28,8 @@ const strArg = (name: string, def: string) => {
 };
 /** 다음 손패 미리 보기: off | fast | normal | deep */
 const LOOK = strArg('look', 'off');
-/** 단계별 조각 확률 가정 바꾸기 (--gamma 0,0,0,0,0 = 모든 단계 균등) */
-if (strArg('gamma', '')) setStageGamma(strArg('gamma', '').split(',').map(Number));
+/** 조각 확률을 모든 조각 균등으로 (--uniform 1). 기본은 실제 플레이 통계(piece-stats.json) */
+if (arg('uniform', 0)) setPieceStats({});
 /** 게임 점수 가중치 덮어쓰기 (--points 0.02) */
 const SIM_W: Weights = { ...DEFAULT_WEIGHTS, points: Number(strArg('points', String(DEFAULT_WEIGHTS.points))) };
 if (LOOK !== 'off' && !(LOOK in LOOKAHEAD_PRESETS)) throw new Error(`--look ${LOOK}?`);

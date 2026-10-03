@@ -14,11 +14,15 @@ describe('게임 규칙', () => {
     expect([1, 2, 3, 4, 5].map(linePoints)).toEqual([300, 1200, 2700, 4800, 7500]);
   });
 
-  it('조각 확률: 합이 1, 단계가 오를수록 작은 조각이 덜 나온다', () => {
+  it('조각 확률: 합이 1, 실제 통계를 따른다 (5단계는 ㄹ이 흔하고 ㅂ·ㅅ은 드물다)', () => {
     for (let s = 1; s <= 5; s++) expect(PIECE_TYPES.reduce((a, t) => a + pieceProbs(s)[t], 0)).toBeCloseTo(1);
-    expect(pieceProbs(1)['·']).toBeCloseTo(pieceProbs(1)['ㅂ']);
-    expect(pieceProbs(5)['·']).toBeLessThan(pieceProbs(1)['·']);
-    expect(pieceProbs(5)['ㅂ']).toBeGreaterThan(pieceProbs(5)['·']);
+    expect(pieceProbs(5)['ㄹ']).toBeGreaterThan(0.1);
+    expect(pieceProbs(5)['ㅂ']).toBeLessThan(0.04);
+    expect(pieceProbs(5)['ㅅ']).toBeLessThan(0.04);
+    // 1단계는 작은 조각(ㅡ)이 5단계보다 많이 나온다
+    expect(pieceProbs(1)['ㅡ']).toBeGreaterThan(pieceProbs(5)['ㅡ']);
+    // 통계에 없는 조각도 0은 아니다
+    for (let s = 1; s <= 5; s++) for (const t of PIECE_TYPES) expect(pieceProbs(s)[t]).toBeGreaterThan(0);
   });
 });
 
