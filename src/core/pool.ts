@@ -64,6 +64,8 @@ export class SolverPool {
   private nextTaskId = 1;
   /** 동시에 일하는 Worker 수 상한 */
   private limit = defaultPoolSize();
+  /** 계획 요청 번호. 새 요청이 오면 이전 요청은 이후 작업을 더 넣지 않는다 */
+  private planGen = 0;
 
   constructor(private readonly maxSize = maxPoolSize()) {}
 
@@ -117,7 +119,9 @@ export class SolverPool {
   }
 
   /** 미리 보기 계산을 Worker들에 나눠 맡기는 runner (코어마다 속도가 달라도 고르게 끝나도록 잘게 나눈다) */
-  private runner(): LookaheadRunner {
+  private runner(gen: number): LookaheadRunner {
+    // 이전 요청이 후보 계산을 마친 뒤에야 미리 보기 작업을 넣으려 할 수 있다 → 이미 밀려났으면 넣지 않는다
+    const run = (task: WorkerTask) => (gen === this.planGen ? this.run(task, 'plan') : Promise.reject(new Cancelled()));
     const sum = <T extends LookaheadTotals>(parts: WorkerResult[], kind: 'lookahead' | 'lookahead2', n: number): T => {
       const acc = { totals: Array(n).fill(0), completes: Array(n).fill(0), pairCompletes: Array(n).fill(0) };
       for (const p of parts) {
@@ -132,15 +136,13 @@ export class SolverPool {
     return {
       totals: async (states: NextState[], hands: PieceType[][], base: LookaheadBase, opts: InnerOptions) => {
         const parts = await Promise.all(
-          split(hands, this.size * 3).map((h) => this.run({ kind: 'lookahead', states, hands: h, base, opts }, 'plan')),
+          split(hands, this.size * 3).map((h) => run({ kind: 'lookahead', states, hands: h, base, opts })),
         );
         return sum<LookaheadTotals>(parts, 'lookahead', states.length);
       },
       totals2: async (states, hands1, hands2, base, opts) => {
         const parts = await Promise.all(
-          split(hands1, this.size * 3).map((h) =>
-            this.run({ kind: 'lookahead2', states, hands1: h, hands2, base, opts }, 'plan'),
-          ),
+          split(hands1, this.size * 3).map((h) => run({ kind: 'lookahead2', states, hands1: h, hands2, base, opts })),
         );
         return sum<Lookahead2Totals>(parts, 'lookahead2', states.length);
       },
@@ -153,12 +155,14 @@ export class SolverPool {
    */
   async plan(input: SolveInput, look: LookaheadOptions | null, onPhase?: (p: LookaheadPhase) => void): Promise<Plan | null> {
     this.cancel('plan');
+    const gen = ++this.planGen;
     this.limit = look?.allCores ? this.maxSize : defaultPoolSize();
     const res = await this.run({ kind: 'candidates', input, look }, 'plan');
+    if (gen !== this.planGen) throw new Cancelled();
     if (res.kind !== 'candidates') throw new Error('unexpected result');
     const plans = res.plans;
     if (!look || plans.length <= 1) return plans[0] ?? null;
-    return runLookahead(input, plans, look, this.runner(), onPhase);
+    return runLookahead(input, plans, look, this.runner(gen), onPhase);
   }
 
   async swaps(input: SolveInput): Promise<SwapAdvice[]> {

@@ -20,6 +20,10 @@ export interface Inventory {
 }
 /** 보유 가능한 아이템 총 개수 */
 export const INVENTORY_CAP = 7;
+/** 블록을 이만큼 놓을 때마다 빈 칸에 아이템이 하나 떨어진다 ('다음 능력 획득까지' 7 → 1) */
+export const DROP_EVERY = 7;
+/** 보드 위 아이템 최대 개수. 넘으면 가장 오래된 것이 사라진다 */
+export const BOARD_ITEM_CAP = 3;
 
 export function emptyRows(): Rows {
   return new Array<number>(H).fill(0);

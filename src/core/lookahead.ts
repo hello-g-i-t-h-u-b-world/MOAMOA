@@ -9,7 +9,7 @@
 //   - 위기 보강: 다음 손패를 다 놓을 확률이 낮으면 표본을 더 뽑는다
 //   - 두 손패 앞: 최종 후보는 다음 손패를 놓은 뒤 그다음 손패까지 놓아 본다
 // 실제 계산(lookaheadTotals / lookahead2Totals)은 순수 함수라 여러 Worker에 나눠 맡길 수 있다.
-import { INVENTORY_CAP, type Inventory, type Item, type Rows } from './board';
+import { DROP_EVERY, INVENTORY_CAP, type Inventory, type Item, type Rows } from './board';
 import { PIECE_TYPES, type PieceType } from './pieces';
 import { itemValue, solveTop, type Plan, type SolveInput } from './search';
 import { DEFAULT_WEIGHTS } from './eval';
@@ -56,15 +56,22 @@ export const LOOKAHEAD_PRESETS = {
 /** 계획대로 놓은 뒤의 상태 (다음 손패 계산의 시작점) */
 export interface NextState {
   rows: Rows;
+  /** 떨어진 순서대로 (새로 떨어진 아이템은 자리를 몰라 넣지 않는다) */
   items: Item[];
   inventory: Inventory;
+  dropIn?: number;
 }
 
-export function stateAfter(input: Pick<SolveInput, 'inventory'>, plan: Plan): NextState {
+export function stateAfter(input: Pick<SolveInput, 'inventory' | 'dropIn'>, plan: Plan): NextState {
   const inventory = { ...input.inventory };
   inventory.dot -= plan.dotsUsed;
   for (const it of plan.itemsGained) if (inventory.dot + inventory.swap < INVENTORY_CAP) inventory[it.type]++;
-  return { rows: plan.finalRows, items: plan.finalItems, inventory };
+  let dropIn = input.dropIn;
+  if (dropIn !== undefined) {
+    dropIn -= plan.moves.filter((m) => m.kind === 'piece').length;
+    if (dropIn <= 0) dropIn += DROP_EVERY;
+  }
+  return { rows: plan.finalRows, items: plan.finalItems, inventory, ...(dropIn !== undefined ? { dropIn } : {}) };
 }
 
 function rng(seed: number) {
@@ -121,6 +128,7 @@ function innerSolve(st: NextState, hand: PieceType[], base: LookaheadBase, opts:
       hand,
       items: st.items,
       inventory: st.inventory,
+      dropIn: st.dropIn,
       weights: base.weights,
       // 다음 손패에서도 점 찍기는 1번까지만 고려 (속도)
       maxDots: Math.min(base.maxDots ?? 1, 1),

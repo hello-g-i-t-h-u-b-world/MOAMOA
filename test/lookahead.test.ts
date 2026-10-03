@@ -25,6 +25,13 @@ describe('다음 손패 미리 보기', () => {
     expect(stateAfter({ inventory: { dot: 1, swap: 6 } }, plan).inventory).toEqual({ dot: 0, swap: 7 });
   });
 
+  it('계획 뒤 상태: 다음 드롭까지 남은 블록 수 (0 이하가 되면 7을 더함)', () => {
+    const plan = { finalRows: emptyRows(), finalItems: [], dotsUsed: 0, itemsGained: [], moves: [{ kind: 'piece' }, { kind: 'dot' }, { kind: 'piece' }, { kind: 'piece' }] } as unknown as Plan;
+    expect(stateAfter({ inventory: { dot: 0, swap: 0 }, dropIn: 5 }, plan).dropIn).toBe(2);
+    expect(stateAfter({ inventory: { dot: 0, swap: 0 }, dropIn: 2 }, plan).dropIn).toBe(6);
+    expect(stateAfter({ inventory: { dot: 0, swap: 0 } }, plan).dropIn).toBeUndefined();
+  });
+
   it('다음 손패 점수 평균이 가장 높은 후보를 고른다', async () => {
     const plans = solveTop({ ...input, hand: [...input.hand] }, 3);
     const fake: LookaheadRunner = {

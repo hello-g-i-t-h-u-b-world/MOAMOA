@@ -6,8 +6,10 @@ export interface DigitExport {
   app: 'moamoa-digits';
   version: 2;
   exportedAt: string;
-  /** 기본 내장값을 뺀, 사용자가 학습시킨 숫자 */
+  /** 기본 내장값을 뺀, 사용자가 학습시킨 숫자 (보유 능력 개수) */
   digits: DigitTemplates;
+  /** '다음 능력 획득까지' 숫자 (글꼴이 달라 따로 학습) */
+  dropDigits?: DigitTemplates;
 }
 
 /** 기본 내장값에 없는(사용자가 학습시킨) 것만 */
@@ -20,8 +22,20 @@ export function learnedOnly(all: DigitTemplates, defaults: DigitTemplates): Digi
   return out;
 }
 
-export function makeExport(all: DigitTemplates, defaults: DigitTemplates): DigitExport {
-  return { app: 'moamoa-digits', version: 2, exportedAt: new Date().toISOString(), digits: learnedOnly(all, defaults) };
+export function makeExport(
+  all: DigitTemplates,
+  defaults: DigitTemplates,
+  dropAll: DigitTemplates = {},
+  dropDefaults: DigitTemplates = {},
+): DigitExport {
+  const dropDigits = learnedOnly(dropAll, dropDefaults);
+  return {
+    app: 'moamoa-digits',
+    version: 2,
+    exportedAt: new Date().toISOString(),
+    digits: learnedOnly(all, defaults),
+    ...(Object.keys(dropDigits).length ? { dropDigits } : {}),
+  };
 }
 
 /** 이 칸 수 이하로만 다르면 같은 숫자로 읽힌다 (matchDigit 기준과 같게) */

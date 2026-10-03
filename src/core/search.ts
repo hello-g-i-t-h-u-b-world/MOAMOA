@@ -1,4 +1,5 @@
 import {
+  BOARD_ITEM_CAP,
   FULL,
   H,
   INVENTORY_CAP,
@@ -15,7 +16,17 @@ import { DEFAULT_WEIGHTS, cheapFeatures, cheapScore, fitFeatures, fitScore, type
 import { PIECES, PIECE_TYPES, type PieceType } from './pieces';
 
 export type Move =
-  | { kind: 'piece'; slot: number; type: PieceType; orient: number; r: number; c: number; cleared: number[] }
+  | {
+      kind: 'piece';
+      slot: number;
+      type: PieceType;
+      orient: number;
+      r: number;
+      c: number;
+      cleared: number[];
+      /** 이 조각을 놓으면 아이템이 떨어진다. expired = 그 때문에 사라지는 가장 오래된 아이템 */
+      drop?: { expired: Item | null };
+    }
   | { kind: 'dot'; r: number; c: number; cleared: number[] };
 
 export interface Plan {
@@ -45,9 +56,15 @@ export interface Outlook {
 
 export interface SolveInput {
   rows: Rows;
+  /**
+   * 보드 위 아이템, 떨어진 순서대로 (가장 오래된 것이 먼저).
+   * 아이템이 새로 떨어질 때 이미 3개면 맨 앞의 것이 사라진다.
+   */
   /** 보유 조각 3칸. null = 이미 사용함 */
   hand: (PieceType | null)[];
   items: Item[];
+  /** 다음 아이템이 떨어질 때까지 남은 블록 수 ('다음 능력 획득까지' 숫자, 1~7). 모르면 생략 */
+  dropIn?: number;
   inventory: Inventory;
   weights?: Weights;
   /** 단계별로 남길 상태 수 */
@@ -173,7 +190,14 @@ export function solveTop(input: SolveInput, count: number): Plan[] {
       const key = hashNode(scratch, remaining, dotsUsed, nGained);
       const prev = children.get(key);
       if (prev && prev.score >= score) return;
-      const { remaining: items, collected } = collectItems(parent.items, cleared);
+      const { remaining: left, collected } = collectItems(parent.items, cleared);
+      // 이 조각으로 아이템이 떨어지면(줄을 지워 획득한 다음) 이미 3개인 경우 가장 오래된 것이 사라진다.
+      // 새 아이템의 자리는 무작위라 계산에 넣지 않는다.
+      const drops = dropsAt(parent, remaining, dotsUsed);
+      const expired = drops && left.length >= BOARD_ITEM_CAP ? left[0] : null;
+      const items = expired ? left.slice(1) : left;
+      const move = makeMove();
+      if (drops && move.kind === 'piece') move.drop = { expired };
       children.set(key, {
         rows: scratch.slice(),
         items,
@@ -182,12 +206,17 @@ export function solveTop(input: SolveInput, count: number): Plan[] {
         gained: collected.length ? parent.gained.concat(collected) : parent.gained,
         lines: parent.lines + cleared.length,
         parent,
-        move: makeMove(),
+        move,
         score,
       });
       if (children.size >= keep * 4) prune();
     };
     const NO_CLEAR: number[] = [];
+    /** 이 수(블록 배치)로 놓은 블록 수가 dropIn에 닿는가 (점 찍기는 세지 않는다) */
+    const dropsAt = (parent: Node, remaining: number, dotsUsed: number) =>
+      input.dropIn !== undefined &&
+      dotsUsed === parent.dotsUsed &&
+      popcount(fullMask & ~remaining) === input.dropIn;
 
     for (const node of frontier) {
       const base = node.rows;

@@ -356,3 +356,17 @@ describe('바꿔 뽑기를 누른 상태 (카드 배경이 연보라)', () => {
     expect(readHandSlot(g, { x: 0, y: 0, w: g.width, h: g.height }).swapping).toBe(false);
   });
 });
+
+describe("'다음 능력 획득까지' 숫자 (진한 글꼴)", () => {
+  const f = load('hand-swap-mode.png'); // 아래쪽에 '다음 능력 획득까지 4번'이 보인다
+  it('숫자만 감싸면 같은 모양으로 읽고, 위쪽 글자가 영역에 걸려도 같다', () => {
+    const a = readDigitSig(f, { x: 56, y: 306, w: 10, h: 16 }, 'dark');
+    expect(a).toMatch(/^5\|/);
+    expect(readDigitSig(f, { x: 54, y: 304, w: 12, h: 20 }, 'dark')).toBe(a);
+    expect(readDigitSig(f, { x: 56, y: 300, w: 10, h: 22 }, 'dark')).toBe(a);
+  });
+  it('학습하면 그 숫자로 읽는다', () => {
+    const sig = readDigitSig(f, { x: 56, y: 306, w: 10, h: 16 }, 'dark')!;
+    expect(matchDigit(sig, { '4': [sig] })).toBe(4);
+  });
+});

@@ -1,5 +1,5 @@
 // 연속된 화면 인식 결과를 비교해 아이템 획득/사용을 추적한다.
-import { FULL, H, INVENTORY_CAP, W, popcount, type Inventory, type Item, type Rows } from '../core/board';
+import { BOARD_ITEM_CAP, FULL, H, INVENTORY_CAP, W, popcount, type Inventory, type Item, type Rows } from '../core/board';
 import type { PieceType } from '../core/pieces';
 
 export interface SlotState {
@@ -30,17 +30,18 @@ export function track(prev: Snapshot | null, cur: Snapshot, tracked: Item[], inv
   if (!prev) return { items: cur.items.slice(), inventory, events };
 
   const filled = (rows: Rows, r: number, c: number) => ((rows[r] >> c) & 1) === 1;
-  const items: Item[] = [];
-  const seen = new Set<string>();
-  for (const it of cur.items) {
-    items.push(it);
-    seen.add(`${it.r},${it.c}`);
-  }
+  const key = (it: Item) => `${it.r},${it.c}`;
+  const seen = new Set(cur.items.map(key));
+  // 아이템은 떨어진 순서대로 기억한다 (가장 오래된 것이 먼저). 기존 아이템은 순서를 유지하고 새로 보인 것은 뒤에 붙인다.
+  const kept: { it: Item; visible: boolean }[] = [];
   for (const it of tracked) {
-    if (seen.has(`${it.r},${it.c}`)) continue;
+    if (seen.has(key(it))) {
+      kept.push({ it, visible: true });
+      continue;
+    }
     if (filled(cur.rows, it.r, it.c)) {
       // 블록 위 아이콘을 한 프레임 놓친 경우 등: 줄이 지워지기 전까지 계속 추적
-      items.push(it);
+      kept.push({ it, visible: false });
       continue;
     }
     // 그 줄에서 칸이 사라졌다 = 줄이 지워졌다 → 아이템 획득
@@ -52,8 +53,21 @@ export function track(prev: Snapshot | null, cur: Snapshot, tracked: Item[], inv
       } else {
         events.push(`${ITEM_NAME[it.type]} 획득 실패 (보유 한도)`);
       }
+    } else {
+      // 줄을 지우지 않았는데 빈 칸의 아이템이 없어졌다 = 새 아이템이 떨어져 가장 오래된 것이 사라짐
+      events.push(`${ITEM_NAME[it.type]} 사라짐 (${it.r + 1}행 ${it.c + 1}열, 오래된 순)`);
     }
   }
+  const trackedKeys = new Set(tracked.map(key));
+  for (const it of cur.items) if (!trackedKeys.has(key(it))) kept.push({ it, visible: true });
+  // 보드 위 아이템은 최대 3개: 새로 떨어져 넘치면 가장 오래된 것이 사라진 것이다.
+  // (안 보이는데 기억만 하던 아이템부터 지운다. 그대로 두면 없는 아이템을 얻으려는 추천이 나온다)
+  while (kept.length > BOARD_ITEM_CAP) {
+    const hidden = kept.findIndex((k) => !k.visible);
+    const [gone] = kept.splice(hidden >= 0 ? hidden : 0, 1);
+    events.push(`${ITEM_NAME[gone.it.type]} 사라짐 (${gone.it.r + 1}행 ${gone.it.c + 1}열, 오래된 순)`);
+  }
+  const items = kept.map((k) => k.it);
 
   const sameHand = prev.hand.length === cur.hand.length && prev.hand.every((s, i) => slotKey(s) === slotKey(cur.hand[i]));
   let added = 0;

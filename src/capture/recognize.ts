@@ -3,6 +3,7 @@
 import { H, W, emptyRows, type Item, type Rows } from '../core/board';
 import { PIECES, PIECE_TYPES, normalize, type Cell, type PieceType } from '../core/pieces';
 import builtinDigits from './digits.json';
+import builtinDropDigits from './drop-digits.json';
 
 export interface Rect {
   x: number;
@@ -339,6 +340,17 @@ function digitWeight([r, g]: RGB): number {
   return Math.max(0, Math.min(1, (Math.min(r, g) - 130) / 80));
 }
 
+/**
+ * '다음 능력 획득까지 N번'의 숫자: 연하늘 배경 (190,255,255) 위의 진한 청록 글자 (27,137,154).
+ * 글자는 R이 낮고 배경은 R이 높다.
+ */
+function darkDigitWeight([r]: RGB): number {
+  return Math.max(0, Math.min(1, (150 - r) / 90));
+}
+
+/** light: 보유 능력 동그라미 안의 밝은 숫자 / dark: '다음 능력 획득까지'의 진한 숫자 */
+export type DigitStyle = 'light' | 'dark';
+
 const DIGIT_ROWS = 8;
 
 /**
@@ -348,7 +360,8 @@ const DIGIT_ROWS = 8;
  */
 export type DigitSig = string;
 
-export function readDigitSig(f: Frame, rect: Rect): DigitSig | null {
+export function readDigitSig(f: Frame, rect: Rect, style: DigitStyle = 'light'): DigitSig | null {
+  const weightOf = style === 'dark' ? darkDigitWeight : digitWeight;
   const x0 = Math.max(0, Math.round(rect.x));
   const y0 = Math.max(0, Math.round(rect.y));
   const x1 = Math.min(f.width, Math.round(rect.x + rect.w));
@@ -361,7 +374,7 @@ export function readDigitSig(f: Frame, rect: Rect): DigitSig | null {
   let rx0 = w, ry0 = h, rx1 = -1, ry1 = -1;
   for (let y = 0; y < h; y++)
     for (let x = 0; x < w; x++) {
-      const v = digitWeight(pixel(f, x0 + x, y0 + y));
+      const v = weightOf(pixel(f, x0 + x, y0 + y));
       rough[y * w + x] = v;
       if (v >= 0.5) {
         strong++;
@@ -384,8 +397,8 @@ export function readDigitSig(f: Frame, rect: Rect): DigitSig | null {
       if (v < 0.02) bgPx.push(pixel(f, x0 + x, y0 + y));
       else if (v >= 0.9) fgPx.push(pixel(f, x0 + x, y0 + y));
     }
-  const bg = bgPx.length ? median(bgPx) : ([39, 115, 203] as RGB);
-  const fg = fgPx.length ? median(fgPx) : ([255, 230, 163] as RGB);
+  const bg = bgPx.length ? median(bgPx) : ((style === 'dark' ? [190, 255, 255] : [39, 115, 203]) as RGB);
+  const fg = fgPx.length ? median(fgPx) : ((style === 'dark' ? [27, 137, 154] : [255, 230, 163]) as RGB);
   const dv = [fg[0] - bg[0], fg[1] - bg[1], fg[2] - bg[2]];
   const dd = dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2] || 1;
   const weight = new Float32Array(w * h);
@@ -424,9 +437,19 @@ export function readDigitSig(f: Frame, rect: Rect): DigitSig | null {
     }
     return best;
   };
-  const xs = run(colMax);
   const ys = run(rowMax);
-  if (!xs || !ys) return null;
+  if (!ys) return null;
+  if (style === 'dark') {
+    // 진한 숫자는 위아래의 글자('다음 능력 획득까지' 등)가 영역에 걸리기 쉽다 → 숫자 줄 안의 열만 본다
+    colMax.fill(0);
+    for (let y = ys[0]; y < ys[1]; y++)
+      for (let x = 0; x < w; x++) {
+        const v = weight[y * w + x];
+        if (v > colMax[x]) colMax[x] = v;
+      }
+  }
+  const xs = run(colMax);
+  if (!xs) return null;
   // 가장자리를 픽셀보다 세밀하게: 가장자리 픽셀이 덮인 비율만큼만 숫자 영역에 넣는다
   const bx0 = xs[0] + 1 - colMax[xs[0]];
   const bx1 = xs[1] - 1 + colMax[xs[1] - 1];
@@ -471,6 +494,9 @@ export type DigitTemplates = Record<string, DigitSig[]>;
  * 사용자들이 학습시켜 보내준 데이터를 scripts/merge-digits.ts로 검사해 합친다.
  */
 export const DEFAULT_DIGITS: DigitTemplates = builtinDigits;
+
+/** '다음 능력 획득까지' 숫자의 기본 내장 모양 (src/capture/drop-digits.json, 글꼴이 달라 따로 학습) */
+export const DEFAULT_DROP_DIGITS: DigitTemplates = builtinDropDigits as DigitTemplates;
 
 /** 두 숫자 모양이 '확실히 다른' 칸 수. 가로 칸 수가 다르면 무한대 */
 export function digitDistance(a: DigitSig, b: DigitSig): number {

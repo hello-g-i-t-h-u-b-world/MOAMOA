@@ -1,5 +1,7 @@
 import '../style.css';
 import {
+  BOARD_ITEM_CAP,
+  DROP_EVERY,
   H,
   INVENTORY_CAP,
   W,
@@ -21,6 +23,7 @@ import { learnedOnly, makeExport } from '../capture/digit-data';
 import { checkProgress, type ProgressResult } from '../core/progress';
 import {
   DEFAULT_DIGITS,
+  DEFAULT_DROP_DIGITS,
   matchDigit,
   readBoard,
   readDigitSig,
@@ -59,17 +62,23 @@ function moveNumberClass(m: Move): string {
 interface Calib {
   board: Rect | null;
   slots: (Rect | null)[];
-  /** 보유 능력 버튼의 숫자 영역 (선택) */
-  counters: Record<ItemKey, Rect | null>;
+  /** 보유 능력 버튼의 숫자 영역 / '다음 능력 획득까지' 숫자 영역 (선택) */
+  counters: Record<CounterKey, Rect | null>;
   /** 영역을 지정할 때의 공유 화면 크기 */
   frame?: { w: number; h: number };
 }
 
 type ItemKey = 'dot' | 'swap';
 const ITEM_KEYS: ItemKey[] = ['dot', 'swap'];
+/** 화면에서 읽는 숫자: 점 찍기 개수 / 바꿔 뽑기 개수 / 다음 능력 획득까지 */
+type CounterKey = ItemKey | 'drop';
+const COUNTER_KEYS: CounterKey[] = ['dot', 'swap', 'drop'];
+const NO_COUNTERS: Record<CounterKey, Rect | null> = { dot: null, swap: null, drop: null };
 
 const CALIB_KEY = 'moamoa.calib.v1';
 const DIGITS_KEY = 'moamoa.digits.v2';
+/** '다음 능력 획득까지' 숫자 (글꼴이 달라 따로 학습) */
+const DROP_DIGITS_KEY = 'moamoa.dropdigits.v1';
 /** 숫자 인식 방식이 바뀌기 전의 학습 데이터 (호환 안 됨) */
 const OLD_DIGITS_KEY = 'moamoa.digits.v1';
 let oldDigitsDropped = false;
@@ -103,30 +112,45 @@ const state = {
   planBase: null as { rows: Rows; used: boolean[] } | null,
   log: [] as string[],
   digits: loadDigits(),
+  dropDigits: loadDigitStore(DROP_DIGITS_KEY, DEFAULT_DROP_DIGITS),
+  /** 다음 아이템이 떨어질 때까지 남은 블록 수 (1~7, 모르면 null) */
+  dropIn: null as number | null,
   /** 화면에서 개수를 읽고 있는가 */
-  countFromScreen: { dot: false, swap: false } as Record<ItemKey, boolean>,
+  countFromScreen: { dot: false, swap: false, drop: false } as Record<CounterKey, boolean>,
   /** 처음 보는 숫자 모양 → 사용자에게 값을 물어본다 */
-  digitPrompt: { dot: null, swap: null } as Record<ItemKey, { sig: DigitSig; url: string } | null>,
+  digitPrompt: { dot: null, swap: null, drop: null } as Record<CounterKey, { sig: DigitSig; url: string } | null>,
 };
 
 function loadCalib(): Calib {
   try {
     const raw = localStorage.getItem(CALIB_KEY);
-    if (raw) return { counters: { dot: null, swap: null }, ...(JSON.parse(raw) as Partial<Calib>) } as Calib;
+    if (raw) {
+      const saved = JSON.parse(raw) as Partial<Calib>;
+      return { ...saved, counters: { ...NO_COUNTERS, ...saved.counters } } as Calib;
+    }
   } catch {
     /* 저장소 사용 불가 */
   }
-  return { board: null, slots: [null, null, null], counters: { dot: null, swap: null } };
+  return { board: null, slots: [null, null, null], counters: { ...NO_COUNTERS } };
 }
 
 function loadDigits(): DigitTemplates {
-  const out: DigitTemplates = structuredClone(DEFAULT_DIGITS);
   try {
     if (localStorage.getItem(OLD_DIGITS_KEY)) {
       localStorage.removeItem(OLD_DIGITS_KEY);
       oldDigitsDropped = true;
     }
-    const raw = localStorage.getItem(DIGITS_KEY);
+  } catch {
+    /* 저장소 사용 불가 */
+  }
+  return loadDigitStore(DIGITS_KEY, DEFAULT_DIGITS);
+}
+
+/** 기본 내장 숫자 + 이 브라우저에서 학습한 숫자 */
+function loadDigitStore(key: string, defaults: DigitTemplates): DigitTemplates {
+  const out: DigitTemplates = structuredClone(defaults);
+  try {
+    const raw = localStorage.getItem(key);
     if (raw) for (const [d, sigs] of Object.entries(JSON.parse(raw) as DigitTemplates)) out[d] = [...new Set([...(out[d] ?? []), ...sigs])];
   } catch {
     /* 저장소 사용 불가 */
@@ -134,14 +158,22 @@ function loadDigits(): DigitTemplates {
   return out;
 }
 
-function learnDigit(sig: DigitSig, value: number) {
-  const list = (state.digits[value] ??= []);
+function learnDigit(key: CounterKey, sig: DigitSig, value: number) {
+  const store = key === 'drop' ? state.dropDigits : state.digits;
+  const list = (store[value] ??= []);
   if (!list.includes(sig)) list.push(sig);
   try {
-    localStorage.setItem(DIGITS_KEY, JSON.stringify(state.digits));
+    localStorage.setItem(key === 'drop' ? DROP_DIGITS_KEY : DIGITS_KEY, JSON.stringify(store));
   } catch {
     /* 무시 */
   }
+}
+
+/** 학습한(기본 내장이 아닌) 숫자 목록 */
+function learnedDigits(store: DigitTemplates, defaults: DigitTemplates): string[] {
+  return Object.keys(store)
+    .filter((d) => store[d].some((sig) => !defaults[d]?.includes(sig)))
+    .sort();
 }
 
 /** 파일 내려받기 */
@@ -162,17 +194,22 @@ function timestamp(): string {
 
 /** 학습한 숫자(기본 내장 제외)를 파일로 내보낸다 */
 function exportDigits() {
-  const data = makeExport(state.digits, DEFAULT_DIGITS);
+  const data = makeExport(state.digits, DEFAULT_DIGITS, state.dropDigits, DEFAULT_DROP_DIGITS);
   const name = `moamoa-digits-${timestamp()}.json`;
   downloadJson(data, name);
-  addLog(`학습 데이터 내보내기: 숫자 ${Object.keys(data.digits).sort().join(', ')} (${name})`);
+  const drop = Object.keys(data.dropDigits ?? {}).sort();
+  addLog(
+    `학습 데이터 내보내기: 보유 개수 ${Object.keys(data.digits).sort().join(', ') || '-'} · 획득까지 ${drop.join(', ') || '-'} (${name})`,
+  );
 }
 
 /** 학습한 숫자를 지우고 기본 템플릿만 남긴다 */
 function resetDigits() {
   state.digits = structuredClone(DEFAULT_DIGITS);
+  state.dropDigits = structuredClone(DEFAULT_DROP_DIGITS);
   try {
     localStorage.removeItem(DIGITS_KEY);
+    localStorage.removeItem(DROP_DIGITS_KEY);
   } catch {
     /* 무시 */
   }
@@ -235,6 +272,7 @@ function requestSolve(fromScreen = false) {
     hand: state.hand.map((s) => (s.used ? null : s.type)),
     items: state.items.slice(),
     inventory: { ...state.inventory },
+    ...(state.dropIn ? { dropIn: state.dropIn } : {}),
     weights: DEFAULT_WEIGHTS,
     maxDots: 2,
     ...effort.search,
@@ -316,6 +354,7 @@ function requestSwapAnalysis() {
     hand: src.hand.map((s) => (s.used ? null : s.type)),
     items: src.items.slice(),
     inventory: { ...state.inventory },
+    ...(state.dropIn ? { dropIn: state.dropIn } : {}),
     weights: DEFAULT_WEIGHTS,
     maxDots: 2,
     ...effortSetting().search,
@@ -506,7 +545,20 @@ function moveSummary(m: Move): string {
   const op = opText(m.slot, PIECES[m.type].orientations[m.orient]);
   return `<b>${m.type}</b> <span class="muted">(${m.slot + 1}번 조각)</span>${op ? ` · <span class="op">${op}</span>` : ''} → <b>${m.r + 1}행 ${m.c + 1}열</b>${
     m.cleared.length ? ` <span class="clear">✦ ${m.cleared.length}줄 제거</span>` : ''
-  }`;
+  }${m.drop ? ` <span class="drop">⬇ 능력 드롭${m.drop.expired ? ` · ${itemIcon(m.drop.expired)} 사라짐` : ''}</span>` : ''}`;
+}
+
+function itemIcon(it: Item): string {
+  return it.type === 'dot' ? '⊙' : '⇄';
+}
+
+/** 이 조각을 놓으면 아이템이 떨어진다는 안내 */
+function dropNote(m: Move): string {
+  if (m.kind !== 'piece' || !m.drop) return '';
+  const e = m.drop.expired;
+  return `<br/><span class="drop">⬇ 이 조각을 놓으면 능력이 떨어짐${
+    e ? ` · 보드 위 아이템이 3개라 가장 오래된 ${itemIcon(e)}(${e.r + 1}행 ${e.c + 1}열)이 사라짐` : ''
+  }</span>`;
 }
 
 function opText(slot: number, target: Orientation): string {
@@ -571,6 +623,7 @@ function renderMoves() {
         gained.length ? ` · 아이템 ${gained.length}개 획득` : ''
       }</span>`;
     }
+    body.innerHTML += dropNote(m);
     li.insertBefore(body, li.children[1] ?? null);
     ol.appendChild(li);
   });
@@ -647,6 +700,7 @@ function renderInventory() {
     minus.textContent = '−';
     minus.onclick = () => {
       state.inventory[key] = Math.max(0, state.inventory[key] - 1);
+      renderInventory();
       requestSolve();
     };
     const n = document.createElement('b');
@@ -656,6 +710,7 @@ function renderInventory() {
     plus.disabled = total >= INVENTORY_CAP;
     plus.onclick = () => {
       state.inventory[key]++;
+      renderInventory();
       requestSolve();
     };
     row.append(minus, n, plus);
@@ -679,7 +734,7 @@ function renderInventory() {
         const b = document.createElement('button');
         b.textContent = String(v);
         b.onclick = () => {
-          learnDigit(prompt.sig, v);
+          learnDigit(key, prompt.sig, v);
           countSmoothers[key].set(v);
           state.digitPrompt[key] = null;
           state.inventory[key] = v;
@@ -694,30 +749,35 @@ function renderInventory() {
       wrap.appendChild(box);
     }
   }
+  wrap.appendChild(renderDropRow());
+
   const cap = document.createElement('div');
   cap.className = 'muted';
-  cap.textContent = `보유 ${total}/${INVENTORY_CAP} · 보드 위 아이템 ${state.items.length}개`;
+  cap.textContent = `보유 ${total}/${INVENTORY_CAP} · 보드 위 아이템 ${state.items.length}/${BOARD_ITEM_CAP}개`;
   wrap.appendChild(cap);
 
-  // 숫자 학습 현황 + 초기화 (개수 영역을 지정했거나 학습한 숫자가 있을 때만)
-  const learned = Object.keys(state.digits)
-    .filter((d) => state.digits[d].some((sig) => !DEFAULT_DIGITS[d]?.includes(sig)))
-    .sort();
-  if (learned.length || ITEM_KEYS.some((k) => state.calib.counters[k])) {
+  // 숫자 학습 현황 + 초기화 (숫자 영역을 지정했거나 학습한 숫자가 있을 때만)
+  const learned = learnedDigits(state.digits, DEFAULT_DIGITS);
+  const learnedDrop = learnedDigits(state.dropDigits, DEFAULT_DROP_DIGITS);
+  const anyLearned = learned.length + learnedDrop.length > 0;
+  if (anyLearned || COUNTER_KEYS.some((k) => state.calib.counters[k])) {
     const row = document.createElement('div');
     row.className = 'digit-learned';
     const text = document.createElement('span');
     text.className = 'muted';
-    const builtin = Object.keys(DEFAULT_DIGITS).sort().join(', ');
-    text.textContent = `학습한 숫자: ${learned.length ? learned.join(', ') : '없음'} (기본 내장: ${builtin})`;
+    const builtin = Object.keys(DEFAULT_DIGITS).sort().join(', ') || '없음';
+    const builtinDrop = Object.keys(DEFAULT_DROP_DIGITS).sort().join(', ') || '없음';
+    text.textContent =
+      `학습한 숫자 · 보유 개수: ${learned.join(', ') || '없음'} (기본 내장: ${builtin})` +
+      ` · 획득까지: ${learnedDrop.join(', ') || '없음'} (기본 내장: ${builtinDrop})`;
     const exp = document.createElement('button');
     exp.textContent = '학습 데이터 내보내기';
     exp.title = '학습한 숫자를 파일로 저장합니다. 이 파일을 보내주면 모든 사용자의 기본값에 넣을 수 있습니다.';
-    exp.disabled = learned.length === 0;
+    exp.disabled = !anyLearned;
     exp.onclick = exportDigits;
     const reset = document.createElement('button');
     reset.textContent = '숫자 학습 초기화';
-    reset.disabled = learned.length === 0;
+    reset.disabled = !anyLearned;
     reset.onclick = () => {
       if (confirm('학습한 숫자를 모두 지울까요? 기본 내장된 숫자만 남습니다.')) resetDigits();
     };
@@ -727,6 +787,61 @@ function renderInventory() {
     row.append(text, btns);
     wrap.appendChild(row);
   }
+}
+
+/** '다음 능력 획득까지' 표시 (화면에서 읽거나 직접 입력) + 처음 보는 숫자 질문 */
+function renderDropRow(): HTMLElement {
+  const box = document.createElement('div');
+  const row = document.createElement('div');
+  row.className = 'inv-row';
+  row.innerHTML = `<span title="블록을 이만큼 더 놓으면 빈 칸에 능력이 떨어집니다. 보드 위 아이템이 이미 3개면 가장 오래된 것이 사라집니다.">⬇ 능력 획득까지</span>`;
+  const set = (v: number | null) => {
+    state.dropIn = v;
+    state.countFromScreen.drop = false;
+    renderInventory();
+    requestSolve();
+  };
+  const minus = document.createElement('button');
+  minus.textContent = '−';
+  minus.onclick = () => set(state.dropIn === null ? DROP_EVERY : Math.max(1, state.dropIn - 1));
+  const n = document.createElement('b');
+  n.textContent = state.dropIn === null ? '?' : `${state.dropIn}번`;
+  const plus = document.createElement('button');
+  plus.textContent = '+';
+  plus.onclick = () => set(state.dropIn === null ? 1 : Math.min(DROP_EVERY, state.dropIn + 1));
+  row.append(minus, n, plus);
+  if (state.countFromScreen.drop) {
+    const tag = document.createElement('small');
+    tag.className = 'tag';
+    tag.textContent = '화면';
+    row.appendChild(tag);
+  }
+  box.appendChild(row);
+  const prompt = state.digitPrompt.drop;
+  if (prompt) {
+    const q = document.createElement('div');
+    q.className = 'digit-prompt';
+    q.innerHTML = `<img src="${prompt.url}" alt="" /><span>'능력 획득까지' 숫자를 처음 봅니다. 몇인가요?</span>`;
+    const btns = document.createElement('div');
+    btns.className = 'digit-btns';
+    for (let v = 1; v <= DROP_EVERY; v++) {
+      const b = document.createElement('button');
+      b.textContent = String(v);
+      b.onclick = () => {
+        learnDigit('drop', prompt.sig, v);
+        countSmoothers.drop.set(v);
+        state.digitPrompt.drop = null;
+        state.dropIn = v;
+        state.countFromScreen.drop = true;
+        addLog(`숫자 ${v} 학습 (능력 획득까지)`);
+        renderInventory();
+      };
+      btns.appendChild(b);
+    }
+    q.appendChild(btns);
+    box.appendChild(q);
+  }
+  return box;
 }
 
 /** 바꿔 뽑기를 추천하는가 (손패를 다 못 놓으면 무조건, 아니면 기대 이득이 비용보다 클 때) */
@@ -801,7 +916,11 @@ let lastFrame: (Frame & { image: CanvasImageSource }) | null = null;
 /** 칸별 마지막으로 읽은 블록 색 */
 const lastColors: (string | null)[][] = Array.from({ length: H }, () => new Array<string | null>(W).fill(null));
 const itemConfirmer = new ItemConfirmer();
-const countSmoothers: Record<ItemKey, CountSmoother> = { dot: new CountSmoother(), swap: new CountSmoother() };
+const countSmoothers: Record<CounterKey, CountSmoother> = {
+  dot: new CountSmoother(),
+  swap: new CountSmoother(),
+  drop: new CountSmoother(),
+};
 let lastSig = '';
 let stable = 0;
 let appliedSig = '';
@@ -934,10 +1053,21 @@ function updateCounters(frame: Frame & { image: CanvasImageSource }, now: number
   const reads = readCounters(frame);
   const changed: ItemKey[] = [];
   let promptChanged = false;
-  for (const k of ITEM_KEYS) {
+  for (const k of COUNTER_KEYS) {
     if (!state.calib.counters[k]) continue;
     const c = countSmoothers[k].update(reads[k], now);
-    if (c.value != null) {
+    if (k === 'drop') {
+      // '다음 능력 획득까지'는 블록을 놓을 때마다 바뀌므로 다시 계산하지 않고 값만 기억한다 (다음 계산 때 반영)
+      if (c.value != null && (state.dropIn !== c.value || !state.countFromScreen.drop)) {
+        state.dropIn = c.value;
+        state.countFromScreen.drop = true;
+        promptChanged = true;
+      }
+      if (c.value != null && state.digitPrompt.drop) {
+        state.digitPrompt.drop = null;
+        promptChanged = true;
+      }
+    } else if (c.value != null) {
       if (!state.countFromScreen[k] || state.inventory[k] !== c.value) {
         if (state.countFromScreen[k]) addLog(`${k === 'dot' ? '⊙ 점 찍기' : '⇄ 바꿔 뽑기'} ${state.inventory[k]} → ${c.value}개`);
         state.inventory[k] = c.value;
@@ -967,13 +1097,14 @@ function updateCounters(frame: Frame & { image: CanvasImageSource }, now: number
 }
 
 /** 보유 능력 숫자 읽기. 영역이 없거나 숫자가 안 보이면 null, 모르는 모양이면 value=null */
-function readCounters(frame: Frame): Record<ItemKey, { sig: DigitSig; value: number | null } | null> {
-  const out = { dot: null, swap: null } as Record<ItemKey, { sig: DigitSig; value: number | null } | null>;
-  for (const k of ITEM_KEYS) {
+function readCounters(frame: Frame): Record<CounterKey, { sig: DigitSig; value: number | null } | null> {
+  const out = { dot: null, swap: null, drop: null } as Record<CounterKey, { sig: DigitSig; value: number | null } | null>;
+  for (const k of COUNTER_KEYS) {
     const rect = state.calib.counters[k];
     if (!rect) continue;
-    const sig = readDigitSig(frame, rect);
-    if (sig) out[k] = { sig, value: matchDigit(sig, state.digits) };
+    const drop = k === 'drop';
+    const sig = readDigitSig(frame, rect, drop ? 'dark' : 'light');
+    if (sig) out[k] = { sig, value: matchDigit(sig, drop ? state.dropDigits : state.digits) };
   }
   return out;
 }
@@ -1049,6 +1180,7 @@ function resetRecognition() {
   boardFilter.reset();
   countSmoothers.dot.reset();
   countSmoothers.swap.reset();
+  countSmoothers.drop.reset();
   dropsPrimed = false;
 }
 
@@ -1071,7 +1203,7 @@ function checkFrameSize(frame: Frame): boolean {
     const scale = (r: Rect | null): Rect | null => (r ? { x: r.x * sx, y: r.y * sy, w: r.w * sx, h: r.h * sy } : null);
     c.board = scale(c.board);
     c.slots = c.slots.map(scale);
-    c.counters = { dot: scale(c.counters.dot), swap: scale(c.counters.swap) };
+    c.counters = { dot: scale(c.counters.dot), swap: scale(c.counters.swap), drop: scale(c.counters.drop) };
     addLog(`공유 화면 크기가 ${c.frame.w}×${c.frame.h} → ${frame.width}×${frame.height}로 바뀌어 영역을 비율대로 맞췄습니다`);
     c.frame = { w: frame.width, h: frame.height };
     saveCalib();
@@ -1104,7 +1236,7 @@ let lastRecordAt = 0;
 
 /** 보드·보유 조각·개수 영역을 모두 포함하는 사각형 */
 function recordArea(frame: Frame): Rect {
-  const rects = [state.calib.board, ...state.calib.slots, state.calib.counters.dot, state.calib.counters.swap].filter(
+  const rects = [state.calib.board, ...state.calib.slots, ...COUNTER_KEYS.map((k) => state.calib.counters[k])].filter(
     (r): r is Rect => !!r,
   );
   const m = 12;
@@ -1169,12 +1301,14 @@ function saveCapture() {
       hand: state.hand,
       items: state.items,
       inventory: state.inventory,
+      dropIn: state.dropIn,
       locked: state.locked,
       plan: state.plan ? { complete: state.plan.complete, moves: state.plan.moves } : null,
     },
     log: state.log,
     // 학습한 숫자도 함께 (scripts/merge-digits.ts로 기본값에 합칠 수 있음)
     digits: learnedOnly(state.digits, DEFAULT_DIGITS),
+    dropDigits: learnedOnly(state.dropDigits, DEFAULT_DROP_DIGITS),
     frames,
   };
   const name = `moamoa-${timestamp()}.json`;
@@ -1321,7 +1455,7 @@ $('btnLock').onclick = () => {
 
 // ───────────── 영역 지정 ─────────────
 
-const TARGETS = ['보드', '조각 1', '조각 2', '조각 3', '점 찍기 개수', '바꿔 뽑기 개수'] as const;
+const TARGETS = ['보드', '조각 1', '조각 2', '조각 3', '점 찍기 개수', '바꿔 뽑기 개수', '능력 획득까지'] as const;
 const TARGET_HELP = [
   '보드 격자(10×16)를 대략 드래그하면 격자선에 자동으로 맞춥니다. 칸마다 찍힌 점이 각 칸 가운데에 오는지 확인하세요.',
   '1번 보유 조각의 흰 영역(블록 그림만, 글자·버튼 제외)을 드래그하세요.',
@@ -1329,6 +1463,7 @@ const TARGET_HELP = [
   '3번 보유 조각의 흰 영역을 드래그하세요.',
   '(선택) 점 찍기 버튼 오른쪽 숫자 동그라미를 드래그하세요.',
   '(선택) 바꿔 뽑기 버튼 오른쪽 숫자 동그라미를 드래그하세요.',
+  "(선택) '다음 능력 획득까지 N번'에서 숫자 N만 드래그하세요 ('번' 글자는 빼고). 아이템이 사라지는 시점을 계산에 씁니다.",
 ];
 let calibTarget = 0;
 const preview = $<HTMLCanvasElement>('preview');
@@ -1338,14 +1473,14 @@ let drag: { x0: number; y0: number; x1: number; y1: number } | null = null;
 function getRect(i: number): Rect | null {
   if (i === 0) return state.calib.board;
   if (i <= 3) return state.calib.slots[i - 1];
-  return state.calib.counters[ITEM_KEYS[i - 4]];
+  return state.calib.counters[COUNTER_KEYS[i - 4]];
 }
 function setRect(i: number, r: Rect) {
   // 영역을 지정한 공유 화면 크기를 함께 기억한다 (나중에 크기가 바뀌면 비율대로 맞춤)
   if (preview.width && preview.height) state.calib.frame = { w: preview.width, h: preview.height };
   if (i === 0) state.calib.board = r;
   else if (i <= 3) state.calib.slots[i - 1] = r;
-  else state.calib.counters[ITEM_KEYS[i - 4]] = r;
+  else state.calib.counters[COUNTER_KEYS[i - 4]] = r;
   saveCalib();
 }
 

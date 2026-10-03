@@ -3,7 +3,7 @@
 //   npm run sim -- --games 24 --look normal --jobs 8   (다음 손패 미리 보기, 8개 프로세스로 나눠 실행)
 //   npm run sim -- --tune 30 --games 12
 import { fork } from 'node:child_process';
-import { H, INVENTORY_CAP, W, emptyRows, isFilled, type Inventory, type Item, type Rows } from '../src/core/board';
+import { BOARD_ITEM_CAP, DROP_EVERY, H, INVENTORY_CAP, W, emptyRows, isFilled, type Inventory, type Item, type Rows } from '../src/core/board';
 import { DEFAULT_WEIGHTS, type Weights } from '../src/core/eval';
 import { PIECE_TYPES, type PieceType } from '../src/core/pieces';
 import { LOOKAHEAD_PRESETS, solveWithLookahead } from '../src/core/lookahead';
@@ -17,7 +17,6 @@ const arg = (name: string, def: number) => {
 const GAMES = arg('games', 10);
 const BEAM = arg('beam', 60);
 const MAX_TURNS = arg('turns', 300);
-const DROP_EVERY = arg('drop', 5);
 const TUNE = arg('tune', 0);
 const USE_SWAP = arg('swap', 1) === 1;
 const FINALISTS = arg('finalists', 60);
@@ -55,7 +54,8 @@ async function playGame(seed: number, w: Weights): Promise<GameResult> {
   let rows: Rows = emptyRows();
   let items: Item[] = [];
   const inv: Inventory = { dot: 0, swap: 0 };
-  let placements = 0;
+  /** 다음 아이템이 떨어질 때까지 남은 블록 수 (게임의 '다음 능력 획득까지') */
+  let dropIn = DROP_EVERY;
   let lines = 0;
   let dotsUsed = 0;
   let swapsUsed = 0;
@@ -69,7 +69,7 @@ async function playGame(seed: number, w: Weights): Promise<GameResult> {
             ...LOOKAHEAD_PRESETS[LOOK as keyof typeof LOOKAHEAD_PRESETS],
             seed: seed * 7919 + turn,
           });
-    const input = () => ({ rows, hand, items, inventory: inv, weights: w, beam: BEAM, finalists: FINALISTS, maxDots: 2 });
+    const input = () => ({ rows, hand, items, inventory: inv, dropIn, weights: w, beam: BEAM, finalists: FINALISTS, maxDots: 2 });
     let plan = await choose(input());
     // 바꿔 뽑기: 기대 이득이 비용보다 크면 사용 (여러 번 가능)
     while (USE_SWAP && inv.swap > 0 && plan) {
@@ -90,19 +90,22 @@ async function playGame(seed: number, w: Weights): Promise<GameResult> {
     dotsUsed += plan.dotsUsed;
     for (const it of plan.itemsGained) if (inv.dot + inv.swap < INVENTORY_CAP) inv[it.type]++;
 
-    // 아이템 드롭 (근사: 턴 종료 시 처리)
-    const before = placements;
-    placements += hand.length;
-    const drops = Math.floor(placements / DROP_EVERY) - Math.floor(before / DROP_EVERY);
-    for (let d = 0; d < drops; d++) {
+    // 아이템 드롭: 블록 7개마다 빈 칸에 하나. 보드 위에 3개가 넘으면 가장 오래된 것이 사라진다.
+    // (사라지는 것은 계획(finalItems)에 이미 반영됨. 새 아이템 자리는 근사로 턴 끝에 정한다)
+    const placed = plan.moves.filter((m) => m.kind === 'piece').length;
+    if (placed >= dropIn) {
       const empties: [number, number][] = [];
       for (let r = 0; r < H; r++)
         for (let c = 0; c < W; c++)
           if (!isFilled(rows, r, c) && !items.some((it) => it.r === r && it.c === c)) empties.push([r, c]);
-      if (!empties.length) break;
-      const [r, c] = empties[Math.floor(rand() * empties.length)];
-      items = items.concat({ r, c, type: rand() < 0.5 ? 'dot' : 'swap' });
+      if (empties.length) {
+        const [r, c] = empties[Math.floor(rand() * empties.length)];
+        items = items.concat({ r, c, type: rand() < 0.5 ? 'dot' : 'swap' });
+        if (items.length > BOARD_ITEM_CAP) items = items.slice(items.length - BOARD_ITEM_CAP);
+      }
+      dropIn += DROP_EVERY;
     }
+    dropIn -= placed;
   }
   return { seed, turns: MAX_TURNS, lines, dotsUsed, swapsUsed };
 }

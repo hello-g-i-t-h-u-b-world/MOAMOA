@@ -250,6 +250,11 @@ button:disabled {
 .move .clear {
   color: var(--good);
 }
+.move .drop,
+.now-text .drop {
+  color: #74c0fc;
+  font-weight: 600;
+}
 .badge {
   width: 24px;
   height: 24px;

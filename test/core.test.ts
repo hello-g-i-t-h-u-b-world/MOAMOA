@@ -227,3 +227,59 @@ describe('보유 능력 숫자 안정화', () => {
     expect(c.update(r(null, 'x'), 1600).unknownSig).toBe('x');
   });
 });
+
+describe('아이템 드롭과 사라짐 (보드 위 최대 3개, 블록 7개마다 드롭)', () => {
+  // 맨 아래 줄은 3칸만 비어 있고, 그 줄에 가장 오래된 아이템 A가 있다
+  const rows = rowsFromStrings([...Array(15).fill('..........'), '#######...']);
+  const A = { r: 15, c: 0, type: 'dot' as const };
+  const B = { r: 0, c: 0, type: 'swap' as const };
+  const C = { r: 1, c: 0, type: 'dot' as const };
+  const base = { rows, items: [A, B, C], inventory: { dot: 0, swap: 0 } };
+
+  it('드롭 직전이면 가장 오래된 아이템이 있는 줄을 먼저 지운다', () => {
+    const plan = solve({ ...base, hand: ['ㅇ', 'ㅡ', null], dropIn: 1 })!;
+    expect(plan.moves[0]).toMatchObject({ kind: 'piece', type: 'ㅡ', cleared: [15] });
+    expect(plan.itemsGained).toEqual([A]);
+  });
+
+  it('줄을 못 지우면 드롭되는 조각에서 가장 오래된 아이템이 사라지고, 계획에도 남지 않는다', () => {
+    const plan = solve({ ...base, hand: ['ㅇ', null, null], dropIn: 1 })!;
+    expect(plan.moves[0]).toMatchObject({ kind: 'piece', drop: { expired: A } });
+    expect(plan.finalItems).toEqual([B, C]);
+    expect(plan.itemsGained).toEqual([]);
+  });
+
+  it('아이템이 3개 미만이면 드롭돼도 사라지는 것은 없다', () => {
+    const plan = solve({ ...base, items: [A, B], hand: ['ㅇ', null, null], dropIn: 1 })!;
+    expect(plan.moves[0]).toMatchObject({ drop: { expired: null } });
+  });
+
+  it('드롭 시점이 손패 밖이면 표시하지 않는다', () => {
+    const plan = solve({ ...base, hand: ['ㅇ', 'ㅡ', 'ㅣ'], dropIn: 5 })!;
+    expect(plan.moves.some((m) => m.kind === 'piece' && m.drop)).toBe(false);
+  });
+});
+
+describe('아이템 순서와 사라진 아이템 정리', () => {
+  const hand = [{ type: 'ㅣ' as const, used: false }];
+  const it1 = { r: 2, c: 2, type: 'dot' as const };
+  const it2 = { r: 4, c: 4, type: 'swap' as const };
+  const it3 = { r: 6, c: 6, type: 'dot' as const };
+  const it4 = { r: 8, c: 8, type: 'swap' as const };
+
+  it('떨어진 순서를 유지한다 (새 아이템은 뒤에)', () => {
+    const prev = { rows: emptyRows(), items: [it3, it1], hand };
+    const cur = { rows: emptyRows(), items: [it2, it1, it3], hand };
+    expect(track(prev, cur, [it3, it1], { dot: 0, swap: 0 }).items).toEqual([it3, it1, it2]);
+  });
+
+  it('블록 위에서 안 보이던 아이템은 4번째가 떨어지면 사라진 것으로 정리한다', () => {
+    const rows = emptyRows();
+    rows[2] = 1 << 2; // it1은 블록 위 (아이콘이 안 보여도 줄이 지워지기 전까지 기억하던 것)
+    const prev = { rows, items: [it2, it3], hand };
+    const cur = { rows, items: [it2, it3, it4], hand };
+    const res = track(prev, cur, [it1, it2, it3], { dot: 0, swap: 0 });
+    expect(res.items).toEqual([it2, it3, it4]);
+    expect(res.events.some((e) => e.includes('사라짐'))).toBe(true);
+  });
+});

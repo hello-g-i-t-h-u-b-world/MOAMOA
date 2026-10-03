@@ -41,4 +41,10 @@ describe('숫자 학습 데이터 내보내기·합치기', () => {
     expect(report.added).toHaveLength(0);
     expect(report.invalid).toHaveLength(3);
   });
+
+  it("'다음 능력 획득까지' 숫자도 따로 내보낸다", () => {
+    const data = makeExport({ '0': [ZERO] }, DEFAULT_DIGITS, { '4': [SIX] }, {});
+    expect(data.dropDigits).toEqual({ '4': [SIX] });
+    expect(makeExport({ '0': [ZERO] }, DEFAULT_DIGITS).dropDigits).toBeUndefined();
+  });
 });
