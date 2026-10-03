@@ -224,6 +224,8 @@ function learnNumber(key: NumberKey, sigs: DigitSig[], text: string): string | n
   if (digits.length !== sigs.length)
     return `숫자 ${sigs.length}자리로 읽혔는데 ${digits.length}자리를 입력했습니다. 화면의 숫자를 그대로 입력하세요 (쉼표는 빼도 됩니다).`;
   sigs.forEach((sig, i) => {
+    // 숫자가 바뀌는 애니메이션 중에 읽은 흐릿한 모양(꽉 찬 칸이 하나도 없음)은 다른 숫자와 헷갈리므로 배우지 않는다
+    if (!sig.split('|')[1]?.includes('9')) return;
     const list = (state.numDigits[digits[i]] ??= []);
     if (!list.includes(sig)) list.push(sig);
   });
