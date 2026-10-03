@@ -100,7 +100,10 @@ scripts/sim.ts           자가 대국 시뮬레이터
 사용자가 `moamoa-digits-*.json`(앱의 '학습 데이터 내보내기')을 주면:
 1. 파일을 저장소 안 임시 폴더로 복사 (다운로드 폴더 파일이 처리 중 사라진 적 있음)
 2. `npx tsx scripts/merge-digits.ts 파일` (검사) → 충돌·형식 오류 확인 → `--write`
-   - digits / dropDigits / numDigits를 각 json에 합치고, pieceStats는 `src/core/piece-stats.json`에 더함
+   - digits / dropDigits / numDigits를 각 json에 합치고(이미 있는 모양은 건너뜀), pieceStats는 `src/core/piece-stats.json`에 더함
+   - **조각 통계는 브라우저에 누적**되므로 같은 브라우저의 파일에는 이미 합친 수가 또 들어 있다.
+     `piece-stats-sources.json`에 출처(앱의 `statsId`, 없으면 `legacy:내보낸시각`)별 마지막 누적값을 두고 늘어난 만큼만 더한다.
+     같은 파일을 다시 받으면 '건너뜀'으로 나온다 (실제로 같은 파일이 "(1)"로 다시 온 적 있음).
 3. 조각 통계가 늘었으면 단계별 비율을 보고 변화 설명. 테스트 → 커밋 → push.
 
 '화면 저장' 파일(인식 오류 분석용, 최근 약 8초 화면 + 인식 결과)은 `scripts/inspect-capture.ts`로 본다.

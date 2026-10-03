@@ -185,6 +185,21 @@ function saveJson(key: string, value: unknown) {
   }
 }
 
+/** 이 브라우저의 조각 통계 출처 ID (처음 한 번 만든다) */
+function statsId(): string {
+  const KEY = 'moamoa.statsid';
+  try {
+    let id = localStorage.getItem(KEY);
+    if (!id) {
+      id = `b-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      localStorage.setItem(KEY, id);
+    }
+    return id;
+  } catch {
+    return 'b-unknown';
+  }
+}
+
 function currentStage(): number {
   return stageOf(state.game.lines);
 }
@@ -293,6 +308,8 @@ function timestamp(): string {
 function exportDigits() {
   const data = {
     ...makeExport(state.digits, DEFAULT_DIGITS, state.dropDigits, DEFAULT_DROP_DIGITS, state.numDigits, DEFAULT_NUM_DIGITS),
+    // 같은 브라우저에서 다시 내보내도 통계가 두 번 더해지지 않게, 브라우저마다 고유 ID를 함께 보낸다
+    statsId: statsId(),
     pieceStats: state.pieceStats,
   };
   const name = `moamoa-digits-${timestamp()}.json`;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { learnedOnly, makeExport, mergeDigits } from '../src/capture/digit-data';
+import { learnedOnly, makeExport, mergeDigits, mergePieceStats } from '../src/capture/digit-data';
 import { DEFAULT_DIGITS } from '../src/capture/recognize';
 
 const ZERO = DEFAULT_DIGITS['0'][0];
@@ -46,5 +46,35 @@ describe('숫자 학습 데이터 내보내기·합치기', () => {
     const data = makeExport({ '0': [ZERO] }, DEFAULT_DIGITS, { '4': [SIX] }, {});
     expect(data.dropDigits).toEqual({ '4': [SIX] });
     expect(makeExport({ '0': [ZERO] }, DEFAULT_DIGITS).dropDigits).toBeUndefined();
+  });
+});
+
+describe('받은 조각 통계 합치기 (같은 브라우저의 누적값 중복 방지)', () => {
+  const first = { exportedAt: 't1', pieceStats: { '5': { ㄹ: 10, ㅁ: 5 } } };
+  it('처음 받은 통계는 그대로 더한다', () => {
+    const r = mergePieceStats({}, {}, first);
+    expect(r.total).toEqual({ '5': { ㄹ: 10, ㅁ: 5 } });
+    expect(r.status).toBe('new');
+  });
+  it('같은 파일을 다시 받으면 건너뛴다', () => {
+    const a = mergePieceStats({}, {}, first);
+    const b = mergePieceStats(a.total, a.sources, first);
+    expect(b.added).toBe(0);
+    expect(b.status).toBe('duplicate');
+    expect(b.total).toEqual(a.total);
+  });
+  it('같은 브라우저에서 더 쌓아 다시 내보내면(ID 없는 예전 파일 → ID 있는 새 파일) 늘어난 만큼만 더한다', () => {
+    const a = mergePieceStats({}, {}, first);
+    const b = mergePieceStats(a.total, a.sources, { statsId: 'b-1', exportedAt: 't2', pieceStats: { '5': { ㄹ: 14, ㅁ: 5, ㅂ: 2 } } });
+    expect(b.added).toBe(6);
+    expect(b.total).toEqual({ '5': { ㄹ: 14, ㅁ: 5, ㅂ: 2 } });
+    const c = mergePieceStats(b.total, b.sources, { statsId: 'b-1', exportedAt: 't3', pieceStats: { '5': { ㄹ: 15, ㅁ: 5, ㅂ: 2 } } });
+    expect(c.added).toBe(1);
+    expect(c.status).toBe('update');
+  });
+  it('다른 브라우저의 통계는 따로 더한다', () => {
+    const a = mergePieceStats({}, {}, { statsId: 'b-1', exportedAt: 't1', pieceStats: { '5': { ㄹ: 10 } } });
+    const b = mergePieceStats(a.total, a.sources, { statsId: 'b-2', exportedAt: 't1', pieceStats: { '5': { ㄹ: 3 } } });
+    expect(b.total).toEqual({ '5': { ㄹ: 13 } });
   });
 });
