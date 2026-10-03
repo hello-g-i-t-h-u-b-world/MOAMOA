@@ -50,9 +50,12 @@ function median(px: RGB[]): RGB {
   return [ch(0), ch(1), ch(2)];
 }
 
-/** 바꿔 뽑기 아이콘의 보라색 화살표 */
+/**
+ * 바꿔 뽑기 아이콘의 보라색 화살표 (밝은 자주 (213,105,244) / 진한 보라 (106,7,154)).
+ * 점 찍기로 놓은 연보라 블록 (130~190, 85~140, 255)은 R이 낮고 G가 높아 걸러진다.
+ */
 function isPurple([r, g, b]: RGB): boolean {
-  return r > 120 && r < 230 && b > 170 && g < 140;
+  return (r >= 195 && r < 230 && b > 200 && g < 125) || (r > 90 && r < 200 && g < 30 && b > 130);
 }
 
 /**
@@ -73,6 +76,8 @@ export interface CellRead {
   filled: boolean;
   color: string | null;
   item: Item['type'] | null;
+  /** 블록 색도 빈칸 색도 거의 안 보임 (아이템 빛·애니메이션에 가려짐) → 직전 상태를 유지해야 함 */
+  unsure: boolean;
 }
 
 /** 칸 영역(0~1 비율 좌표)의 픽셀들 */
@@ -106,9 +111,11 @@ export const EFFECT_ROW_ITEMS = 3;
  *  - 파랑: B≈255 (빈칸·반짝임은 B ≤ 235)
  *  - 노랑/초록: B가 매우 낮음, R로 구분
  *  - 분홍: R, B 모두 높고 G는 중간
+ *  - 보라: 점 찍기로 채운 칸. B≈255, G가 파랑보다 낮다
  */
 function classify([r, g, b]: RGB): string | 'empty' | null {
   if (b >= 245 && r < 170 && g > 155 && g < 215) return 'blue';
+  if (b >= 240 && r >= 120 && r <= 200 && g >= 70 && g <= 150 && r - g >= 30) return 'purple';
   if (b < 120 && g > 160 && r > 235) return 'yellow';
   if (b < 90 && g > 170 && r < 190) return 'green';
   if (r > 228 && b > 185 && g > 70 && g < 180) return 'pink';
@@ -133,15 +140,15 @@ export function readCell(f: Frame, board: Rect, r: number, c: number): CellRead 
   };
   vote(corners);
   const item = detectItem(cellPatch(f, board, r, c, 0.15, 0.15, 0.85, 0.85));
-  // 아이템 아이콘의 빛이 모서리를 덮어 판단이 안 서면, 칸 바깥 테두리 쪽도 본다
-  let decided = 0;
-  for (const n of votes.values()) decided += n;
-  if (item && decided < corners.length * 0.25) {
+  // 아이템 아이콘의 빛(또는 떨어지는 애니메이션)이 모서리를 덮어 판단이 안 서면, 칸 바깥 테두리 쪽도 본다
+  const decidedVotes = () => [...votes.values()].reduce((a, n) => a + n, 0);
+  if (decidedVotes() < corners.length * 0.25) {
     vote(cellPatch(f, board, r, c, 0.03, 0.03, 0.97, 0.12));
     vote(cellPatch(f, board, r, c, 0.03, 0.88, 0.97, 0.97));
     vote(cellPatch(f, board, r, c, 0.03, 0.12, 0.12, 0.88));
     vote(cellPatch(f, board, r, c, 0.88, 0.12, 0.97, 0.88));
   }
+  const unsure = decidedVotes() < corners.length * 0.25;
   let color: string | null = null;
   let blockVotes = 0;
   for (const [k, n] of votes)
@@ -150,17 +157,20 @@ export function readCell(f: Frame, board: Rect, r: number, c: number): CellRead 
       color = k;
     }
   const filled = blockVotes > (votes.get('empty') ?? 0) && blockVotes >= corners.length * 0.1;
-  return { filled, color: filled ? color : null, item };
+  return { filled, color: filled ? color : null, item, unsure: unsure && !filled };
 }
 
 export interface BoardRead {
   rows: Rows;
+  /** 판단이 안 서는 칸 (행마다 비트) */
+  unsure: Rows;
   items: Item[];
   colors: (string | null)[][];
 }
 
 export function readBoard(f: Frame, board: Rect): BoardRead {
   const rows = emptyRows();
+  const unsure = emptyRows();
   const items: Item[] = [];
   const colors: (string | null)[][] = [];
   for (let r = 0; r < H; r++) {
@@ -169,13 +179,14 @@ export function readBoard(f: Frame, board: Rect): BoardRead {
     for (let c = 0; c < W; c++) {
       const cell = readCell(f, board, r, c);
       if (cell.filled) rows[r] |= 1 << c;
+      if (cell.unsure) unsure[r] |= 1 << c;
       if (cell.item) rowItems.push({ r, c, type: cell.item });
       colors[r].push(cell.color);
     }
     // 아이템은 한 칸씩 떨어진다. 한 줄 여러 칸이 동시에 아이템처럼 보이면 줄 제거 이펙트다.
     if (rowItems.length < EFFECT_ROW_ITEMS) items.push(...rowItems);
   }
-  return { rows, items, colors };
+  return { rows, unsure, items, colors };
 }
 
 export interface HandRead {
@@ -190,6 +201,8 @@ export interface HandRead {
   color: string | null;
   /** 사용자가 클릭해 선택한 상태 (카드 배경이 연노랑) */
   selected: boolean;
+  /** 바꿔 뽑기를 누른 상태 (카드 배경이 연보라) */
+  swapping: boolean;
 }
 
 function isWhite([r, g, b]: RGB): boolean {
@@ -199,6 +212,11 @@ function isWhite([r, g, b]: RGB): boolean {
 /** 조각을 클릭했을 때의 연노랑 카드 배경. 노랑 블록(B ≤ 120)과는 B로 구분된다. */
 function isSelectedBg([r, g, b]: RGB): boolean {
   return r > 235 && g > 215 && b >= 130 && b <= 225;
+}
+
+/** 바꿔 뽑기를 눌렀을 때의 연보라 카드 배경 (225,137,255) ~ (240,168,255) */
+function isSwapBg([r, g, b]: RGB): boolean {
+  return b >= 245 && r >= 200 && r <= 245 && g >= 120 && g <= 180 && r - g >= 55;
 }
 
 function isPieceColor(p: RGB): boolean {
@@ -218,6 +236,7 @@ export function readHandSlot(f: Frame, rect: Rect): HandRead {
   const rowHist = new Array<number>(y1 - y0).fill(0);
   let white = 0;
   let selectedBg = 0;
+  let swapBg = 0;
   let total = 0;
   for (let y = y0; y < y1; y++)
     for (let x = x0; x < x1; x++) {
@@ -225,14 +244,17 @@ export function readHandSlot(f: Frame, rect: Rect): HandRead {
       total++;
       if (isWhite(p)) white++;
       else if (isSelectedBg(p)) selectedBg++;
+      else if (isSwapBg(p)) swapBg++;
       else if (isPieceColor(p)) {
         colHist[x - x0]++;
         rowHist[y - y0]++;
       }
     }
   const selected = selectedBg > white;
-  const none: HandRead = { type: null, orient: -1, used: false, unknown: false, color: null, selected };
+  const none: HandRead = { type: null, orient: -1, used: false, unknown: false, color: null, selected, swapping: false };
   if (total === 0) return none;
+  // 바꿔 뽑기를 누르면 카드 배경이 연보라로 바뀐다 (조각은 그대로)
+  if (swapBg > white && swapBg / total > 0.3) return { ...none, selected: false, swapping: true };
   // '사용 완료' 상태면 흰(또는 선택된 연노랑) 배경이 사라진다
   if ((white + selectedBg) / total < 0.3) return { ...none, used: true, selected: false };
 
@@ -298,7 +320,7 @@ export function readHandSlot(f: Frame, rect: Rect): HandRead {
     }
   }
   const color = [...votes].sort((a, c) => c[1] - a[1])[0]?.[0] ?? null;
-  return { type: b.type, orient: b.orient, used: false, unknown: false, color, selected };
+  return { type: b.type, orient: b.orient, used: false, unknown: false, color, selected, swapping: false };
 }
 
 /** 셀 목록을 해당 블록 방향 인덱스로 변환 (수동 입력용) */

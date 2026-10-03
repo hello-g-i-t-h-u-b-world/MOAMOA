@@ -1,5 +1,5 @@
 // 추천 단계 진행 추적: 사용자가 안내대로 놓았는지 화면 인식 결과로 판단한다.
-import { FULL, H, W, place, placeDot, popcount, type Rows } from './board';
+import { FULL, H, canPlace, place, placeDot, popcount, type Rows } from './board';
 import { PIECES } from './pieces';
 import type { Move } from './search';
 
@@ -71,5 +71,24 @@ export function checkProgress(
   if (extra >= 0) return { kind: 'deviated', reason: `${extra + 1}번 조각을 안내와 다르게 놓음` };
   // 조각은 그대로인데 보드가 달라졌다 (점 찍기를 다른 곳에 썼거나 다른 변화)
   if (boardDiff(liveRows, before) > PROGRESS_TOLERANCE) return { kind: 'deviated', reason: '보드가 안내와 다르게 바뀜' };
+  // 차이가 작아도, 남은 안내대로 놓을 수 없게 됐으면 다시 계산한다
+  // (계산할 때 아이템 빛에 가려 빈칸으로 잘못 본 칸이 나중에 블록으로 보이는 경우 등)
+  if (!playable(liveRows, moves.slice(step))) return { kind: 'deviated', reason: '안내한 자리에 이미 블록이 있음' };
   return { kind: 'same' };
+}
+
+/** 이 보드에서 남은 단계를 순서대로 모두 놓을 수 있는가 */
+function playable(rows: Rows, moves: readonly Move[]): boolean {
+  let cur = rows;
+  for (const m of moves) {
+    if (m.kind === 'dot') {
+      if ((cur[m.r] >> m.c) & 1) return false;
+      cur = placeDot(cur, m.r, m.c).rows;
+    } else {
+      const o = PIECES[m.type].orientations[m.orient];
+      if (!canPlace(cur, o, m.r, m.c)) return false;
+      cur = place(cur, o, m.r, m.c).rows;
+    }
+  }
+  return true;
 }

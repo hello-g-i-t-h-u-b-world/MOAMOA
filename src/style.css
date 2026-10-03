@@ -158,6 +158,9 @@ button:disabled {
 .cell.c-green {
   background: #aad613;
 }
+.cell.c-purple {
+  background: #a678ff;
+}
 .cell.item {
   color: #e5dbff;
   font-size: 16px;

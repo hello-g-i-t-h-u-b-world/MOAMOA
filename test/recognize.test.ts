@@ -314,3 +314,45 @@ describe('보유 조각 인식 (조각별 스크린샷)', () => {
     expect(readHandSlot(f, rect)).toMatchObject({ type: 'ㅡ', color: 'blue', used: false, selected: true });
   });
 });
+
+describe('점 찍기로 놓은 연보라 블록 (실제 스크린샷)', () => {
+  const f = load('dot-block.png');
+  it('채워진 칸(보라)으로 읽고, 바꿔 뽑기 아이콘으로 오인식하지 않는다', () => {
+    expect(readCell(f, { x: 0, y: 0, w: 290, h: 464 }, 0, 0)).toMatchObject({ filled: true, color: 'purple', item: null });
+  });
+});
+
+describe('분홍 블록 위의 점 찍기 (실제 스크린샷)', () => {
+  const f = load('dot-on-pink.png');
+  const board = { x: 4, y: 4, w: 260, h: 416 };
+  it('분홍 블록 + 점 찍기, 주변 칸도 그대로', () => {
+    expect(readCell(f, board, 2, 1)).toMatchObject({ filled: true, color: 'pink', item: 'dot' });
+    expect(readCell(f, board, 2, 0)).toMatchObject({ filled: true, color: 'pink', item: null });
+    expect(readCell(f, board, 1, 0)).toMatchObject({ filled: false, unsure: false });
+  });
+  it('아이콘 빛이 칸을 거의 다 덮으면 "판단 불가"로 표시 (빈칸으로 단정하지 않음)', () => {
+    // 칸 전체를 연분홍 빛(블록 색도 빈칸 색도 아님)으로 덮는다
+    const g = { ...f, data: Uint8Array.from(f.data) };
+    for (let y = 56; y < 82; y++)
+      for (let x = 30; x < 56; x++) {
+        const i = (y * g.width + x) * 4;
+        g.data.set([253, 225, 248], i);
+      }
+    expect(readCell(g, board, 2, 1)).toMatchObject({ filled: false, unsure: true });
+  });
+});
+
+describe('바꿔 뽑기를 누른 상태 (카드 배경이 연보라)', () => {
+  const f = load('hand-swap-mode.png');
+  it('세 칸 모두 바꿔 뽑기 중으로 읽고, 사용 완료로 보지 않는다', () => {
+    for (const y of [41, 116, 191]) {
+      const h = readHandSlot(f, { x: 8, y, w: 50, h: 60 });
+      expect(h.swapping).toBe(true);
+      expect(h.used).toBe(false);
+    }
+  });
+  it('평소 카드는 바꿔 뽑기 중이 아니다', () => {
+    const g = load('hand-selected.png');
+    expect(readHandSlot(g, { x: 0, y: 0, w: g.width, h: g.height }).swapping).toBe(false);
+  });
+});

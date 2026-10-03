@@ -184,6 +184,17 @@ describe('보드 칸 필터 (순간적인 오인식 거르기)', () => {
     expect(run([[0, B], [250, cleared], [500, cleared], [800, cleared]]).rows).toEqual(cleared);
   });
 
+  it('판단 불가 칸(아이템 빛에 가려짐)은 오래 이어져도 확정 상태를 유지', () => {
+    const f = new BoardFilter();
+    f.update(rowsFromStrings(B), 0);
+    const hidden = rowsFromStrings(['####.###.#', '##.....###', '..........']); // (0,8)이 빈칸처럼 보임
+    const unsure = rowsFromStrings(['........#.']);
+    let out = rowsFromStrings(B);
+    for (let t = 250; t <= 5000; t += 250) out = f.update(hidden, t, unsure);
+    expect(rowsToStrings(out).slice(0, 3)).toEqual(B);
+    expect(f.pending).toBe(false);
+  });
+
   it('꽉 찬 줄은 빈 줄로 본다', () => {
     expect(rowsToStrings(withoutFullRows(rowsFromStrings(['##########', '#.........'])).slice(0, 2))).toEqual([
       '..........',

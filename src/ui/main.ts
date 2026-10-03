@@ -40,7 +40,7 @@ interface Slot {
   /** 화면에 보이는 방향 (-1 = 모름) */
   orient: number;
   used: boolean;
-  /** 화면에서 읽은 블록 색 (blue / pink / yellow / green), 수동 입력이면 null */
+  /** 화면에서 읽은 블록 색 (blue / pink / yellow / green / purple=점 찍기), 수동 입력이면 null */
   color?: string | null;
 }
 
@@ -197,13 +197,13 @@ function addLog(msg: string) {
   renderLog();
 }
 
-/** 게임에서 조각을 선택(노란 카드)한 동안 화면 반영·계산을 멈춘 상태 */
+/** 게임에서 조각을 선택(노란 카드)하거나 바꿔 뽑기를 누른(보라 카드) 동안 화면 반영·계산을 멈춘 상태 */
 let selectionPaused = false;
 let statusBeforeSelection: { text: string; kind: string } | null = null;
 
 function setStatus(msg: string, kind: 'idle' | 'busy' | 'ok' | 'warn' = 'idle') {
   // 조각 선택 중에는 '선택 중' 표시를 유지하고, 다른 상태는 선택이 끝난 뒤 보여준다
-  if (selectionPaused && !msg.startsWith('✋')) {
+  if (selectionPaused) {
     statusBeforeSelection = { text: msg, kind };
     return;
   }
@@ -824,8 +824,10 @@ function tick() {
   const slots = state.calib.slots.map((r) => readHandSlot(frame, r!));
   // 게임에서 조각을 클릭해 선택(노란 카드)한 동안에는 화면을 반영하지도, 계산하지도 않는다.
   // (조각을 끌고 다니는 중의 보드 변화도 무시) 선택이 끝나면 그때 화면부터 다시 반영한다.
-  if (slots.some((s) => s.selected)) {
-    enterSelectionPause();
+  // 바꿔 뽑기를 누른 동안(카드 배경이 보라)도 마찬가지로 멈춘다. 조각이 바뀌면 끝난 뒤 새 블록으로 보고 다시 계산한다.
+  const swapping = slots.some((s) => s.swapping);
+  if (swapping || slots.some((s) => s.selected)) {
+    enterSelectionPause(swapping ? '⇄ 바꿔 뽑기 중 · 계산 멈춤' : '✋ 조각 선택 중 · 계산 멈춤');
     recordFrame(frame, now, { selected: true, hand: slots });
     return;
   }
@@ -834,7 +836,7 @@ function tick() {
   const b = readBoard(frame, state.calib.board!);
   const rawRows = b.rows;
   // 칸 상태는 일정 시간 같은 상태가 이어질 때만 바꾼다 (순간적인 오인식·아이콘 빛·애니메이션 거르기)
-  b.rows = boardFilter.update(rawRows, now);
+  b.rows = boardFilter.update(rawRows, now, b.unsure);
   // 채워져 있는데 색을 못 읽은 칸(빛에 가려 유지된 칸 등)은 직전 색을 쓴다
   for (let r = 0; r < H; r++)
     for (let c = 0; c < W; c++)
@@ -986,13 +988,15 @@ function cropUrl(frame: Frame & { image: CanvasImageSource }, r: Rect): string {
 
 let selectionPausedAt = 0;
 
-function enterSelectionPause() {
-  if (selectionPaused) return;
-  selectionPaused = true;
-  selectionPausedAt = performance.now();
+function enterSelectionPause(label: string) {
   const el = $('status');
-  statusBeforeSelection = { text: el.textContent ?? '', kind: el.dataset.kind ?? 'idle' };
-  setStatus('✋ 조각 선택 중 · 계산 멈춤', 'idle');
+  if (!selectionPaused) {
+    selectionPaused = true;
+    selectionPausedAt = performance.now();
+    statusBeforeSelection = { text: el.textContent ?? '', kind: el.dataset.kind ?? 'idle' };
+  }
+  el.textContent = label;
+  el.dataset.kind = 'idle';
 }
 
 function leaveSelectionPause() {
@@ -1419,7 +1423,7 @@ function drawPreview(frame: Frame & { image: CanvasImageSource }) {
     const pw = br.w / W;
     const ph = br.h / H;
     const rad = Math.max(2, Math.min(pw, ph) * 0.18);
-    const dotColor: Record<string, string> = { blue: '#1c7ed6', pink: '#d6336c', yellow: '#f08c00', green: '#2b8a3e' };
+    const dotColor: Record<string, string> = { blue: '#1c7ed6', pink: '#d6336c', yellow: '#f08c00', green: '#2b8a3e', purple: '#7048e8' };
     for (let r = 0; r < H; r++)
       for (let c = 0; c < W; c++) {
         const cx = br.x + (c + 0.5) * pw;

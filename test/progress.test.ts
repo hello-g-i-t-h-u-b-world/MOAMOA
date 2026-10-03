@@ -59,4 +59,14 @@ describe('추천 단계 진행 추적', () => {
     for (let i = 0; i <= dotStep; i++) if (p.moves[i].kind === 'piece') used[2] = true;
     expect(checkProgress(rows, p.moves, [true, true, false], dotStep, af[dotStep], used)).toMatchObject({ kind: 'advanced' });
   });
+
+  it('계산 때 빈칸으로 잘못 본 칸이 블록으로 보이면(1칸 차이라도) 안내한 자리를 못 쓰므로 다시 계산', () => {
+    const m = plan.moves[0] as { kind: 'piece'; type: 'ㅣ' | 'ㅡ'; orient: number; r: number; c: number };
+    const live = base.slice();
+    live[m.r] |= 1 << m.c; // 1단계 자리 중 한 칸이 사실은 채워져 있었다
+    expect(checkProgress(base, plan.moves, usedAtPlan, 0, live, usedAtPlan)).toEqual({
+      kind: 'deviated',
+      reason: '안내한 자리에 이미 블록이 있음',
+    });
+  });
 });

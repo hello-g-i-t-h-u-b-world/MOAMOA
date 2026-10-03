@@ -170,11 +170,16 @@ export class BoardFilter {
     return this.since.size > 0;
   }
 
-  update(raw: Rows, now: number): Rows {
+  /**
+   * @param unsure 판단이 안 서는 칸 (아이템 빛·애니메이션에 가려짐). 이 칸은 확정 상태를 그대로 둔다.
+   */
+  update(rawIn: Rows, now: number, unsure?: Rows): Rows {
     if (!this.stable) {
-      this.stable = withoutFullRows(raw);
+      this.stable = withoutFullRows(rawIn);
       return this.stable.slice();
     }
+    const stable = this.stable;
+    const raw = unsure ? rawIn.map((x, r) => (x & ~unsure[r]) | (stable[r] & unsure[r])) : rawIn;
     const next = this.stable.slice();
     for (let r = 0; r < H; r++) {
       const diff = (raw[r] ^ this.stable[r]) & FULL;
