@@ -5,7 +5,8 @@
 import { fork } from 'node:child_process';
 import { BOARD_ITEM_CAP, DROP_EVERY, H, INVENTORY_CAP, W, emptyRows, isFilled, type Inventory, type Item, type Rows } from '../src/core/board';
 import { DEFAULT_WEIGHTS, type Weights } from '../src/core/eval';
-import { PIECE_TYPES, type PieceType } from '../src/core/pieces';
+import type { PieceType } from '../src/core/pieces';
+import { DOT_PROB, pickPiece, pieceProbs, setStageGamma, stageOf } from '../src/core/rules';
 import { LOOKAHEAD_PRESETS, solveWithLookahead } from '../src/core/lookahead';
 import { analyzeSwaps, solve, type SolveInput } from '../src/core/search';
 
@@ -27,6 +28,10 @@ const strArg = (name: string, def: string) => {
 };
 /** 다음 손패 미리 보기: off | fast | normal | deep */
 const LOOK = strArg('look', 'off');
+/** 단계별 조각 확률 가정 바꾸기 (--gamma 0,0,0,0,0 = 모든 단계 균등) */
+if (strArg('gamma', '')) setStageGamma(strArg('gamma', '').split(',').map(Number));
+/** 게임 점수 가중치 덮어쓰기 (--points 0.02) */
+const SIM_W: Weights = { ...DEFAULT_WEIGHTS, points: Number(strArg('points', String(DEFAULT_WEIGHTS.points))) };
 if (LOOK !== 'off' && !(LOOK in LOOKAHEAD_PRESETS)) throw new Error(`--look ${LOOK}?`);
 
 function rng(seed: number) {
@@ -43,20 +48,27 @@ function rng(seed: number) {
 interface GameResult {
   seed: number;
   turns: number;
+  /** 게임 점수 (배치 칸 수 + 줄 제거 300×줄² + 능력 획득 50) */
+  score: number;
   lines: number;
+  /** 동시에 지운 줄 수별 횟수 [1줄, 2줄, 3줄, 4줄, 5줄] */
+  combos: number[];
   dotsUsed: number;
   swapsUsed: number;
 }
 
 async function playGame(seed: number, w: Weights): Promise<GameResult> {
   const rand = rng(seed);
-  const pick = (): PieceType => PIECE_TYPES[Math.floor(rand() * PIECE_TYPES.length)];
+  // 조각 등장 확률은 제거한 줄 누적(단계)에 따라 바뀐다
+  const pick = (): PieceType => pickPiece(rand, pieceProbs(stageOf(lines)));
   let rows: Rows = emptyRows();
   let items: Item[] = [];
   const inv: Inventory = { dot: 0, swap: 0 };
   /** 다음 아이템이 떨어질 때까지 남은 블록 수 (게임의 '다음 능력 획득까지') */
   let dropIn = DROP_EVERY;
   let lines = 0;
+  let score = 0;
+  const combos = [0, 0, 0, 0, 0];
   let dotsUsed = 0;
   let swapsUsed = 0;
 
@@ -69,7 +81,18 @@ async function playGame(seed: number, w: Weights): Promise<GameResult> {
             ...LOOKAHEAD_PRESETS[LOOK as keyof typeof LOOKAHEAD_PRESETS],
             seed: seed * 7919 + turn,
           });
-    const input = () => ({ rows, hand, items, inventory: inv, dropIn, weights: w, beam: BEAM, finalists: FINALISTS, maxDots: 2 });
+    const input = () => ({
+      rows,
+      hand,
+      items,
+      inventory: inv,
+      dropIn,
+      stage: stageOf(lines),
+      weights: w,
+      beam: BEAM,
+      finalists: FINALISTS,
+      maxDots: 2,
+    });
     let plan = await choose(input());
     // 바꿔 뽑기: 기대 이득이 비용보다 크면 사용 (여러 번 가능)
     while (USE_SWAP && inv.swap > 0 && plan) {
@@ -81,11 +104,13 @@ async function playGame(seed: number, w: Weights): Promise<GameResult> {
       swapsUsed++;
       plan = await choose(input());
     }
-    if (!plan || !plan.complete) return { seed, turns: turn, lines, dotsUsed, swapsUsed };
+    if (!plan || !plan.complete) return { seed, turns: turn, score, lines, combos, dotsUsed, swapsUsed };
 
     rows = plan.finalRows;
     items = plan.finalItems;
     lines += plan.lines;
+    score += plan.points;
+    for (const m of plan.moves) if (m.cleared.length) combos[Math.min(5, m.cleared.length) - 1]++;
     inv.dot -= plan.dotsUsed;
     dotsUsed += plan.dotsUsed;
     for (const it of plan.itemsGained) if (inv.dot + inv.swap < INVENTORY_CAP) inv[it.type]++;
@@ -93,27 +118,29 @@ async function playGame(seed: number, w: Weights): Promise<GameResult> {
     // 아이템 드롭: 블록 7개마다 빈 칸에 하나. 보드 위에 3개가 넘으면 가장 오래된 것이 사라진다.
     // (사라지는 것은 계획(finalItems)에 이미 반영됨. 새 아이템 자리는 근사로 턴 끝에 정한다)
     const placed = plan.moves.filter((m) => m.kind === 'piece').length;
-    if (placed >= dropIn) {
+    // 능력을 7개 보유 중이면 생기지 않는다
+    if (placed >= dropIn && inv.dot + inv.swap < INVENTORY_CAP) {
       const empties: [number, number][] = [];
       for (let r = 0; r < H; r++)
         for (let c = 0; c < W; c++)
           if (!isFilled(rows, r, c) && !items.some((it) => it.r === r && it.c === c)) empties.push([r, c]);
       if (empties.length) {
         const [r, c] = empties[Math.floor(rand() * empties.length)];
-        items = items.concat({ r, c, type: rand() < 0.5 ? 'dot' : 'swap' });
+        items = items.concat({ r, c, type: rand() < DOT_PROB ? 'dot' : 'swap' });
         if (items.length > BOARD_ITEM_CAP) items = items.slice(items.length - BOARD_ITEM_CAP);
       }
-      dropIn += DROP_EVERY;
     }
+    if (placed >= dropIn) dropIn += DROP_EVERY;
     dropIn -= placed;
   }
-  return { seed, turns: MAX_TURNS, lines, dotsUsed, swapsUsed };
+  return { seed, turns: MAX_TURNS, score, lines, combos, dotsUsed, swapsUsed };
 }
 
 async function evaluate(w: Weights, seeds: number[]): Promise<{ mean: number; results: GameResult[] }> {
   const results: GameResult[] = [];
   for (const s of seeds) results.push(await playGame(s, w));
-  return { mean: results.reduce((a, r) => a + r.turns, 0) / results.length, results };
+  // 목표는 점수 (튜닝도 평균 점수 기준)
+  return { mean: results.reduce((a, r) => a + r.score, 0) / results.length, results };
 }
 
 const seedList = strArg('seeds', '');
@@ -142,23 +169,28 @@ async function runParallel(): Promise<GameResult[]> {
 }
 
 if (arg('child', 0)) {
-  for (const s of seeds) process.send!(await playGame(s, DEFAULT_WEIGHTS));
+  for (const s of seeds) process.send!(await playGame(s, SIM_W));
 } else if (!TUNE) {
   const t = performance.now();
-  const results = JOBS > 1 ? await runParallel() : (await evaluate(DEFAULT_WEIGHTS, seeds)).results;
+  const results = JOBS > 1 ? await runParallel() : (await evaluate(SIM_W, seeds)).results;
   if (JOBS <= 1) for (const r of results) console.log(JSON.stringify(r));
   const mean = results.reduce((a, r) => a + r.turns, 0) / results.length;
+  const meanScore = results.reduce((a, r) => a + r.score, 0) / results.length;
+  const combos = [0, 1, 2, 3, 4].map((k) => results.reduce((a, r) => a + r.combos[k], 0));
+  const clears = combos.reduce((a, b) => a + b, 0) || 1;
   const died = results.filter((r) => r.turns < MAX_TURNS).length;
   const turnsTotal = results.reduce((a, r) => a + r.turns, 0);
   console.log(
-    `[look=${LOOK} beam=${BEAM}] 평균 생존 턴: ${mean.toFixed(1)} (최대 ${MAX_TURNS}), ` +
+    `[look=${LOOK} beam=${BEAM} points=${SIM_W.points}] 평균 점수 ${Math.round(meanScore).toLocaleString()} ` +
+      `(턴당 ${Math.round(meanScore / Math.max(1, mean))}) · 동시 제거 비율 ${combos.map((n, k) => `${k + 1}줄 ${((n / clears) * 100).toFixed(0)}%`).join(' ')} · ` +
+      `평균 생존 턴: ${mean.toFixed(1)} (최대 ${MAX_TURNS}), ` +
       `게임오버 ${died}/${results.length}판, 1000턴당 게임오버 ${((died / turnsTotal) * 1000).toFixed(2)}회, ` +
       `${((performance.now() - t) / 1000).toFixed(1)}s`,
   );
 } else {
   // 간단한 무작위 언덕 오르기
   const rand = rng(42);
-  let best: Weights = { ...DEFAULT_WEIGHTS };
+  let best: Weights = { ...SIM_W };
   let bestMean = (await evaluate(best, seeds)).mean;
   console.log('start', bestMean);
   const keys = Object.keys(best) as (keyof Weights)[];

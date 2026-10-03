@@ -1,6 +1,7 @@
 // 연속된 화면 인식 결과를 비교해 아이템 획득/사용을 추적한다.
 import { BOARD_ITEM_CAP, FULL, H, INVENTORY_CAP, W, popcount, type Inventory, type Item, type Rows } from '../core/board';
-import type { PieceType } from '../core/pieces';
+import { PIECES, type PieceType } from '../core/pieces';
+import { ITEM_POINTS, linePoints } from '../core/rules';
 
 export interface SlotState {
   type: PieceType | null;
@@ -19,6 +20,10 @@ export interface TrackResult {
   items: Item[];
   inventory: Inventory;
   events: string[];
+  /** 이번 변화에서 지워진 가로줄 수 */
+  cleared: number;
+  /** 이번 변화로 얻은 게임 점수 (추정: 놓은 칸 수 + 줄 제거 + 능력 획득) */
+  points: number;
 }
 
 const ITEM_NAME = { dot: '점 찍기', swap: '바꿔 뽑기' } as const;
@@ -27,7 +32,8 @@ const slotKey = (s: SlotState) => (s.used ? 'U' : (s.type ?? '?'));
 export function track(prev: Snapshot | null, cur: Snapshot, tracked: Item[], inv: Inventory): TrackResult {
   const inventory = { ...inv };
   const events: string[] = [];
-  if (!prev) return { items: cur.items.slice(), inventory, events };
+  if (!prev) return { items: cur.items.slice(), inventory, events, cleared: 0, points: 0 };
+  let gainedItems = 0;
 
   const filled = (rows: Rows, r: number, c: number) => ((rows[r] >> c) & 1) === 1;
   const key = (it: Item) => `${it.r},${it.c}`;
@@ -49,6 +55,7 @@ export function track(prev: Snapshot | null, cur: Snapshot, tracked: Item[], inv
     if (lost !== 0) {
       if (inventory.dot + inventory.swap < INVENTORY_CAP) {
         inventory[it.type]++;
+        gainedItems++;
         events.push(`${ITEM_NAME[it.type]} 획득`);
       } else {
         events.push(`${ITEM_NAME[it.type]} 획득 실패 (보유 한도)`);
@@ -80,10 +87,22 @@ export function track(prev: Snapshot | null, cur: Snapshot, tracked: Item[], inv
   }
 
   // 손패 변화 없이 한 칸만 채워짐 → 점 찍기 사용
+  let placedCells = 0;
   if (sameHand && (added === 1 || (added === 0 && clearedNine)) && inventory.dot > 0) {
     inventory.dot--;
+    placedCells++;
     events.push('점 찍기 사용');
   }
+  // 놓은 조각 = 이번에 '사용 완료'가 된 칸
+  cur.hand.forEach((s, i) => {
+    const p = prev.hand[i];
+    if (s.used && p && !p.used && p.type) placedCells += PIECES[p.type].size;
+  });
+  // 줄 제거: 블록이 있던 줄이 통째로 비었다 (중력이 없어 줄 제거로만 생긴다)
+  let cleared = 0;
+  for (let r = 0; r < H; r++) if (prev.rows[r] !== 0 && cur.rows[r] === 0) cleared++;
+  if (cleared) events.push(`✦ ${cleared}줄 제거 (+${linePoints(cleared).toLocaleString()}점)`);
+  const points = placedCells + linePoints(cleared) + gainedItems * ITEM_POINTS;
 
   // 보드 변화 없이 조각 하나만 다른 종류로 바뀜 → 바꿔 뽑기 사용
   if (sameBoard && !sameHand && inventory.swap > 0) {
@@ -95,7 +114,7 @@ export function track(prev: Snapshot | null, cur: Snapshot, tracked: Item[], inv
     }
   }
 
-  return { items, inventory, events };
+  return { items, inventory, events, cleared, points };
 }
 
 /**

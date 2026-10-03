@@ -14,6 +14,7 @@ import {
 } from './board';
 import { DEFAULT_WEIGHTS, cheapFeatures, cheapScore, fitFeatures, fitScore, type Weights } from './eval';
 import { PIECES, PIECE_TYPES, type PieceType } from './pieces';
+import { ITEM_POINTS, linePoints, pieceProbs } from './rules';
 
 export type Move =
   | {
@@ -24,8 +25,11 @@ export type Move =
       r: number;
       c: number;
       cleared: number[];
-      /** 이 조각을 놓으면 아이템이 떨어진다. expired = 그 때문에 사라지는 가장 오래된 아이템 */
-      drop?: { expired: Item | null };
+      /**
+       * 이 조각을 놓으면 아이템이 떨어진다. expired = 그 때문에 사라지는 가장 오래된 아이템.
+       * blocked = 능력을 7개 보유 중이라 이번에는 생기지 않음
+       */
+      drop?: { expired: Item | null; blocked?: boolean };
     }
   | { kind: 'dot'; r: number; c: number; cleared: number[] };
 
@@ -39,6 +43,8 @@ export interface Plan {
   dotsUsed: number;
   finalRows: Rows;
   finalItems: Item[];
+  /** 이 계획으로 얻는 게임 점수 (배치 칸 수 + 줄 제거 300×줄² + 능력 획득 50) */
+  points: number;
   /** 다음 손패 미리 보기 결과 (했을 때만) */
   outlook?: Outlook;
 }
@@ -56,12 +62,12 @@ export interface Outlook {
 
 export interface SolveInput {
   rows: Rows;
+  /** 보유 조각 3칸. null = 이미 사용함 */
+  hand: (PieceType | null)[];
   /**
    * 보드 위 아이템, 떨어진 순서대로 (가장 오래된 것이 먼저).
    * 아이템이 새로 떨어질 때 이미 3개면 맨 앞의 것이 사라진다.
    */
-  /** 보유 조각 3칸. null = 이미 사용함 */
-  hand: (PieceType | null)[];
   items: Item[];
   /** 다음 아이템이 떨어질 때까지 남은 블록 수 ('다음 능력 획득까지' 숫자, 1~7). 모르면 생략 */
   dropIn?: number;
@@ -71,8 +77,10 @@ export interface SolveInput {
   beam?: number;
   /** 정밀 평가할 최종 후보 수 */
   finalists?: number;
-  /** 한 턴에 고려할 점 찍기 최대 사용 횟수 */
+  /** 한 턴에 고려할 점 찍기 최대 사용 횟수 (다 놓을 수 없으면 가진 만큼 모두 고려) */
   maxDots?: number;
+  /** 지금 단계 (1~5, 제거한 줄 누적으로 정해짐). 조각 등장 확률에 쓴다 */
+  stage?: number;
 }
 
 /** 다 놓지 못한 블록 1개당 벌점 */
@@ -85,6 +93,8 @@ interface Node {
   dotsUsed: number;
   gained: Item[];
   lines: number;
+  /** 이 경로로 얻은 게임 점수 */
+  points: number;
   parent: Node | null;
   move: Move | null;
   score: number;
@@ -107,9 +117,14 @@ function movesOf(n: Node): Move[] {
 }
 
 export function itemValue(gained: number, dotsUsed: number, inv: Inventory, w: Weights): number {
-  // 보유 한도를 넘는 아이템은 획득해도 소용없다
+  // 보유 한도를 넘는 아이템은 획득해도 소용없다 (탐색에서는 애초에 획득하지 않게 처리하지만 안전하게 한 번 더)
   const room = INVENTORY_CAP - (inv.dot + inv.swap) + dotsUsed;
   return Math.min(gained, Math.max(0, room)) * w.itemGain - dotsUsed * w.dotCost;
+}
+
+/** 계획의 '게임 점수' 가치 (평가 점수 단위) */
+export function pointsValue(points: number, w: Weights): number {
+  return points * w.points;
 }
 
 /** 점 찍기 후보 칸: 한 칸만 비어 있는 줄의 빈칸, 사방이 막힌 1칸 구멍 */
@@ -140,6 +155,15 @@ export function solve(input: SolveInput): Plan | null {
  * 다음 손패 미리 보기(lookahead.ts)에서 후보로 쓴다.
  */
 export function solveTop(input: SolveInput, count: number): Plan[] {
+  const plans = solveTopOnce(input, count);
+  // 다 놓을 수 없으면 점 찍기를 가진 만큼 모두 써 본다 (보유 능력이 있으면 게임이 끝나지 않는다)
+  const maxDots = Math.min(input.maxDots ?? 1, input.inventory.dot);
+  if (plans[0] && !plans[0].complete && input.inventory.dot > maxDots)
+    return solveTopOnce({ ...input, maxDots: Math.min(input.inventory.dot, INVENTORY_CAP) }, count);
+  return plans;
+}
+
+function solveTopOnce(input: SolveInput, count: number): Plan[] {
   const w = input.weights ?? DEFAULT_WEIGHTS;
   const beam = input.beam ?? 150;
   const finalists = input.finalists ?? 60;
@@ -158,6 +182,7 @@ export function solveTop(input: SolveInput, count: number): Plan[] {
     dotsUsed: 0,
     gained: [],
     lines: 0,
+    points: 0,
     parent: null,
     move: null,
     score: 0,
@@ -180,24 +205,44 @@ export function solveTop(input: SolveInput, count: number): Plan[] {
       children = new Map(top.map((n) => [hashNode(n.rows, n.remaining, n.dotsUsed, n.gained.length), n]));
       cut = top[top.length - 1].score;
     };
+    const held0 = input.inventory.dot + input.inventory.swap;
     /** scratch에 만든 보드를 평가해 남길 만하면 자식으로 추가 */
-    const push = (parent: Node, cleared: number[], remaining: number, dotsUsed: number, makeMove: () => Move) => {
-      const nGained =
-        parent.gained.length +
-        (cleared.length && parent.items.length ? parent.items.filter((it) => cleared.includes(it.r)).length : 0);
-      const score = cheapScore(cheapFeatures(scratch), w) + itemValue(nGained, dotsUsed, input.inventory, w);
+    const push = (
+      parent: Node,
+      cleared: number[],
+      remaining: number,
+      dotsUsed: number,
+      cells: number,
+      makeMove: () => Move,
+    ) => {
+      // 보유 능력이 7개면 아이콘이 있는 줄을 지워도 획득하지 못하고 아이콘은 그대로 남는다
+      const room = INVENTORY_CAP - (held0 + parent.gained.length - dotsUsed);
+      const inRows = cleared.length && parent.items.length ? parent.items.filter((it) => cleared.includes(it.r)).length : 0;
+      const nCollect = Math.max(0, Math.min(inRows, room));
+      const nGained = parent.gained.length + nCollect;
+      const points = parent.points + cells + linePoints(cleared.length) + nCollect * ITEM_POINTS;
+      const score =
+        cheapScore(cheapFeatures(scratch), w) + itemValue(nGained, dotsUsed, input.inventory, w) + pointsValue(points, w);
       if (score <= cut) return;
       const key = hashNode(scratch, remaining, dotsUsed, nGained);
       const prev = children.get(key);
       if (prev && prev.score >= score) return;
-      const { remaining: left, collected } = collectItems(parent.items, cleared);
+      let left = parent.items;
+      let collected: Item[] = [];
+      if (inRows) {
+        const r = collectItems(parent.items, cleared);
+        collected = r.collected.slice(0, nCollect); // 오래된 것부터 획득
+        const notTaken = r.collected.slice(nCollect);
+        left = notTaken.length ? parent.items.filter((it) => !collected.includes(it)) : r.remaining;
+      }
       // 이 조각으로 아이템이 떨어지면(줄을 지워 획득한 다음) 이미 3개인 경우 가장 오래된 것이 사라진다.
-      // 새 아이템의 자리는 무작위라 계산에 넣지 않는다.
+      // 능력을 7개 보유 중이면 생기지 않는다. 새 아이템의 자리는 무작위라 계산에 넣지 않는다.
       const drops = dropsAt(parent, remaining, dotsUsed);
-      const expired = drops && left.length >= BOARD_ITEM_CAP ? left[0] : null;
+      const blocked = drops && held0 + nGained - dotsUsed >= INVENTORY_CAP;
+      const expired = drops && !blocked && left.length >= BOARD_ITEM_CAP ? left[0] : null;
       const items = expired ? left.slice(1) : left;
       const move = makeMove();
-      if (drops && move.kind === 'piece') move.drop = { expired };
+      if (drops && move.kind === 'piece') move.drop = blocked ? { expired: null, blocked: true } : { expired };
       children.set(key, {
         rows: scratch.slice(),
         items,
@@ -205,6 +250,7 @@ export function solveTop(input: SolveInput, count: number): Plan[] {
         dotsUsed,
         gained: collected.length ? parent.gained.concat(collected) : parent.gained,
         lines: parent.lines + cleared.length,
+        points,
         parent,
         move,
         score,
@@ -245,7 +291,7 @@ export function solveTop(input: SolveInput, count: number): Plan[] {
                   cleared.push(r + i);
                 } else scratch[r + i] = v;
               }
-              push(node, cleared, remaining, node.dotsUsed, () => ({
+              push(node, cleared, remaining, node.dotsUsed, PIECES[type].size, () => ({
                 kind: 'piece',
                 slot,
                 type,
@@ -263,7 +309,7 @@ export function solveTop(input: SolveInput, count: number): Plan[] {
         for (const [r, c] of dotCandidates(base)) {
           const res = placeDot(base, r, c);
           for (let i = 0; i < H; i++) scratch[i] = res.rows[i];
-          push(node, res.cleared, node.remaining, node.dotsUsed + 1, () => ({
+          push(node, res.cleared, node.remaining, node.dotsUsed + 1, 1, () => ({
             kind: 'dot',
             r,
             c,
@@ -307,6 +353,7 @@ export function solveTop(input: SolveInput, count: number): Plan[] {
     dotsUsed: n.dotsUsed,
     finalRows: n.rows,
     finalItems: n.items,
+    points: n.points,
   }));
 }
 
@@ -321,7 +368,7 @@ export interface SwapAdvice {
 
 /**
  * 바꿔 뽑기 분석: 각 칸을 무작위 블록으로 바꿨을 때의 기대 점수를 계산한다.
- * 블록 등장 확률은 균등하다고 가정한다.
+ * 블록 등장 확률은 지금 단계의 확률(rules.ts)을 쓴다.
  */
 export function analyzeSwaps(input: SolveInput): SwapAdvice[] {
   if (input.inventory.swap <= 0) return [];
@@ -332,21 +379,17 @@ export function analyzeSwaps(input: SolveInput): SwapAdvice[] {
   const baseScore = basePlan ? basePlan.score : -UNPLACED_PENALTY * 3;
   input.hand.forEach((type, slot) => {
     if (!type) return;
+    const probs = pieceProbs(input.stage);
     let sum = 0;
-    let completeCount = 0;
+    let completeRate = 0;
     for (const t of PIECE_TYPES) {
       const hand = input.hand.slice();
       hand[slot] = t;
       const plan = solve({ ...fast, hand });
-      sum += plan ? plan.score : -UNPLACED_PENALTY * 3;
-      if (plan?.complete) completeCount++;
+      sum += probs[t] * (plan ? plan.score : -UNPLACED_PENALTY * 3);
+      if (plan?.complete) completeRate += probs[t];
     }
-    out.push({
-      slot,
-      type,
-      gain: sum / PIECE_TYPES.length - baseScore,
-      completeRate: completeCount / PIECE_TYPES.length,
-    });
+    out.push({ slot, type, gain: sum - baseScore, completeRate });
   });
   return out.sort((a, b) => b.gain - a.gain);
 }

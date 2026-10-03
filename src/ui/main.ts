@@ -21,6 +21,7 @@ import { Cancelled, SolverPool } from '../core/pool';
 import { ScreenCapture } from '../capture/capture';
 import { learnedOnly, makeExport } from '../capture/digit-data';
 import { checkProgress, type ProgressResult } from '../core/progress';
+import { STAGE_RANGES, linePoints, stageOf } from '../core/rules';
 import {
   DEFAULT_DIGITS,
   DEFAULT_DROP_DIGITS,
@@ -79,6 +80,12 @@ const CALIB_KEY = 'moamoa.calib.v1';
 const DIGITS_KEY = 'moamoa.digits.v2';
 /** '다음 능력 획득까지' 숫자 (글꼴이 달라 따로 학습) */
 const DROP_DIGITS_KEY = 'moamoa.dropdigits.v1';
+/** 게임 진행 (제거한 줄 누적 → 단계, 추정 점수) */
+const GAME_KEY = 'moamoa.game.v1';
+/** 실제로 받은 조각 통계 (단계별). 공개되지 않은 등장 확률을 추정하는 데 쓴다 */
+const PIECE_STATS_KEY = 'moamoa.piecestats.v1';
+/** 목표 점수 */
+const TARGET_SCORE = 500_000;
 /** 숫자 인식 방식이 바뀌기 전의 학습 데이터 (호환 안 됨) */
 const OLD_DIGITS_KEY = 'moamoa.digits.v1';
 let oldDigitsDropped = false;
@@ -115,6 +122,10 @@ const state = {
   dropDigits: loadDigitStore(DROP_DIGITS_KEY, DEFAULT_DROP_DIGITS),
   /** 다음 아이템이 떨어질 때까지 남은 블록 수 (1~7, 모르면 null) */
   dropIn: null as number | null,
+  /** 제거한 가로줄 누적 / 추정 점수 (화면 공유로 본 변화로 센다. 중간부터 시작했으면 직접 고친다) */
+  game: loadJson(GAME_KEY, { lines: 0, score: 0 }),
+  /** 단계 → 조각 → 받은 횟수 */
+  pieceStats: loadJson(PIECE_STATS_KEY, {} as Record<string, Record<string, number>>),
   /** 화면에서 개수를 읽고 있는가 */
   countFromScreen: { dot: false, swap: false, drop: false } as Record<CounterKey, boolean>,
   /** 처음 보는 숫자 모양 → 사용자에게 값을 물어본다 */
@@ -132,6 +143,51 @@ function loadCalib(): Calib {
     /* 저장소 사용 불가 */
   }
   return { board: null, slots: [null, null, null], counters: { ...NO_COUNTERS } };
+}
+
+function loadJson<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw) return { ...fallback, ...(JSON.parse(raw) as T) };
+  } catch {
+    /* 저장소 사용 불가 */
+  }
+  return structuredClone(fallback);
+}
+
+function saveJson(key: string, value: unknown) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    /* 무시 */
+  }
+}
+
+function currentStage(): number {
+  return stageOf(state.game.lines);
+}
+
+/** 화면에서 본 변화(줄 제거·배치)를 게임 진행에 더한다 */
+function addProgress(cleared: number, points: number) {
+  if (!cleared && !points) return;
+  const before = currentStage();
+  state.game.lines += cleared;
+  state.game.score += points;
+  saveJson(GAME_KEY, state.game);
+  const after = currentStage();
+  if (after !== before)
+    addLog(`▲ ${after}단계 진입 (누적 ${state.game.lines}줄) · 칸 수가 적은 조각이 덜 나옵니다`);
+}
+
+/** 새로 받은 조각을 단계별로 센다 (바꿔 뽑기로 받은 조각 포함) */
+function countPieces(prev: Snapshot, cur: Snapshot) {
+  const stage = String(currentStage());
+  const st = (state.pieceStats[stage] ??= {});
+  cur.hand.forEach((s, i) => {
+    const p = prev.hand[i];
+    if (s.type && !s.used && (!p || p.used || p.type !== s.type)) st[s.type] = (st[s.type] ?? 0) + 1;
+  });
+  saveJson(PIECE_STATS_KEY, state.pieceStats);
 }
 
 function loadDigits(): DigitTemplates {
@@ -194,7 +250,7 @@ function timestamp(): string {
 
 /** 학습한 숫자(기본 내장 제외)를 파일로 내보낸다 */
 function exportDigits() {
-  const data = makeExport(state.digits, DEFAULT_DIGITS, state.dropDigits, DEFAULT_DROP_DIGITS);
+  const data = { ...makeExport(state.digits, DEFAULT_DIGITS, state.dropDigits, DEFAULT_DROP_DIGITS), pieceStats: state.pieceStats };
   const name = `moamoa-digits-${timestamp()}.json`;
   downloadJson(data, name);
   const drop = Object.keys(data.dropDigits ?? {}).sort();
@@ -273,6 +329,7 @@ function requestSolve(fromScreen = false) {
     items: state.items.slice(),
     inventory: { ...state.inventory },
     ...(state.dropIn ? { dropIn: state.dropIn } : {}),
+    stage: currentStage(),
     weights: DEFAULT_WEIGHTS,
     maxDots: 2,
     ...effort.search,
@@ -355,6 +412,7 @@ function requestSwapAnalysis() {
     items: src.items.slice(),
     inventory: { ...state.inventory },
     ...(state.dropIn ? { dropIn: state.dropIn } : {}),
+    stage: currentStage(),
     weights: DEFAULT_WEIGHTS,
     maxDots: 2,
     ...effortSetting().search,
@@ -544,8 +602,8 @@ function moveSummary(m: Move): string {
   if (m.kind === 'dot') return `<b>⊙ 점 찍기</b> → <b>${m.r + 1}행 ${m.c + 1}열</b>`;
   const op = opText(m.slot, PIECES[m.type].orientations[m.orient]);
   return `<b>${m.type}</b> <span class="muted">(${m.slot + 1}번 조각)</span>${op ? ` · <span class="op">${op}</span>` : ''} → <b>${m.r + 1}행 ${m.c + 1}열</b>${
-    m.cleared.length ? ` <span class="clear">✦ ${m.cleared.length}줄 제거</span>` : ''
-  }${m.drop ? ` <span class="drop">⬇ 능력 드롭${m.drop.expired ? ` · ${itemIcon(m.drop.expired)} 사라짐` : ''}</span>` : ''}`;
+    m.cleared.length ? ` <span class="clear">✦ ${m.cleared.length}줄 제거 +${linePoints(m.cleared.length).toLocaleString()}</span>` : ''
+  }${m.drop && !m.drop.blocked ? ` <span class="drop">⬇ 능력 드롭${m.drop.expired ? ` · ${itemIcon(m.drop.expired)} 사라짐` : ''}</span>` : ''}`;
 }
 
 function itemIcon(it: Item): string {
@@ -555,6 +613,7 @@ function itemIcon(it: Item): string {
 /** 이 조각을 놓으면 아이템이 떨어진다는 안내 */
 function dropNote(m: Move): string {
   if (m.kind !== 'piece' || !m.drop) return '';
+  if (m.drop.blocked) return `<br/><span class="drop muted">⬇ 드롭 차례지만 능력을 7개 보유 중이라 생기지 않음</span>`;
   const e = m.drop.expired;
   return `<br/><span class="drop">⬇ 이 조각을 놓으면 능력이 떨어짐${
     e ? ` · 보드 위 아이템이 3개라 가장 오래된 ${itemIcon(e)}(${e.r + 1}행 ${e.c + 1}열)이 사라짐` : ''
@@ -619,7 +678,7 @@ function renderMoves() {
     }
     if (m.cleared.length) {
       const gained = plan.itemsGained.filter((it) => m.cleared.includes(it.r));
-      body.innerHTML += `<br/><span class="clear">✦ ${m.cleared.length}줄 제거${
+      body.innerHTML += `<br/><span class="clear">✦ ${m.cleared.length}줄 동시 제거 (+${linePoints(m.cleared.length).toLocaleString()}점)${
         gained.length ? ` · 아이템 ${gained.length}개 획득` : ''
       }</span>`;
     }
@@ -631,7 +690,8 @@ function renderMoves() {
   const lines: string[] = [];
   if (!plan.complete) lines.push('<p class="warn">⚠ 이 손패로는 모든 조각을 놓을 수 없습니다.</p>');
   lines.push(
-    `<p class="muted">줄 제거 ${plan.lines} · 아이템 획득 ${plan.itemsGained.length} · 평가 ${plan.score.toFixed(1)} · ${state.solveMs.toFixed(0)}ms</p>`,
+    `<p class="points">이번 손패 예상 <b>+${plan.points.toLocaleString()}점</b> <span class="muted">(줄 제거 ${plan.lines} · 능력 획득 ${plan.itemsGained.length})</span></p>`,
+    `<p class="muted">평가 ${plan.score.toFixed(1)} · ${state.solveMs.toFixed(0)}ms · ${currentStage()}단계 확률로 계산</p>`,
   );
   const o = plan.outlook;
   if (o) {
@@ -688,6 +748,7 @@ function renderHand() {
 function renderInventory() {
   const wrap = $('inventory');
   wrap.innerHTML = '';
+  wrap.appendChild(renderGameRow());
   const total = state.inventory.dot + state.inventory.swap;
   for (const [key, label] of [
     ['dot', '⊙ 점 찍기'],
@@ -787,6 +848,40 @@ function renderInventory() {
     row.append(text, btns);
     wrap.appendChild(row);
   }
+}
+
+/** 게임 진행: 제거한 줄 누적(단계)과 추정 점수. 중간부터 보기 시작했으면 줄 수를 직접 고친다 */
+function renderGameRow(): HTMLElement {
+  const box = document.createElement('div');
+  box.className = 'game-row';
+  const stage = currentStage();
+  const lines = document.createElement('label');
+  lines.innerHTML = `제거한 줄 `;
+  const input = document.createElement('input');
+  input.type = 'number';
+  input.min = '0';
+  input.value = String(state.game.lines);
+  input.title = '게임 화면의 누적 줄 수와 다르면 고치세요 (단계 = 조각 등장 확률)';
+  input.onchange = () => {
+    const before = stage;
+    state.game.lines = Math.max(0, Math.round(Number(input.value) || 0));
+    saveJson(GAME_KEY, state.game);
+    if (currentStage() !== before) requestSolve(state.locked);
+    renderInventory();
+  };
+  lines.appendChild(input);
+  lines.append(`줄 · `);
+  const st = document.createElement('b');
+  st.textContent = `${stage}단계`;
+  st.title = `${STAGE_RANGES[stage - 1]} · 단계가 오를수록 칸 수가 적은 조각이 덜 나옵니다`;
+  lines.appendChild(st);
+  const score = document.createElement('div');
+  score.className = 'muted';
+  const pct = Math.min(100, (state.game.score / TARGET_SCORE) * 100);
+  score.innerHTML = `추정 점수 <b>${state.game.score.toLocaleString()}</b> / ${TARGET_SCORE.toLocaleString()} (${pct.toFixed(1)}%)`;
+  score.title = '화면 공유로 본 배치·줄 제거·능력 획득으로 센 값입니다. 중간부터 보기 시작했으면 실제보다 적습니다.';
+  box.append(lines, score);
+  return box;
 }
 
 /** '다음 능력 획득까지' 표시 (화면에서 읽거나 직접 입력) + 처음 보는 숫자 질문 */
@@ -1015,8 +1110,10 @@ function tick() {
     knownItems = new Set(res.items.map(itemKey));
     dropsPrimed = true;
   }
+  if (prevSnap && newBlocks) countPieces(prevSnap, snap);
   prevSnap = snap;
   res.events.forEach(addLog);
+  addProgress(res.cleared, res.points);
   if (slots.some((s) => s.unknown)) addLog('인식할 수 없는 조각이 있습니다 (영역을 확인하세요)');
 
   live.rows = b.rows;
@@ -1414,6 +1511,9 @@ $('btnReset').onclick = () => {
   state.items = [];
   state.hand = [0, 1, 2].map(() => ({ type: null, orient: -1, used: false }));
   state.inventory = { dot: 0, swap: 0 };
+  // 새 게임: 제거한 줄·추정 점수도 처음부터
+  state.game = { lines: 0, score: 0 };
+  saveJson(GAME_KEY, state.game);
   live.rows = emptyRows();
   live.colors = [];
   live.items = [];

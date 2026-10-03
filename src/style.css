@@ -364,6 +364,23 @@ button:disabled {
   flex-direction: column;
   gap: 6px;
 }
+.game-row {
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line, #2c3440);
+  font-size: 13px;
+}
+.game-row input {
+  width: 64px;
+  margin: 0 2px;
+}
+.game-row b {
+  color: var(--good);
+}
+.verdict .points b {
+  color: var(--good);
+  font-size: 15px;
+}
 .inv-row {
   display: flex;
   align-items: center;

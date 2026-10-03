@@ -10,8 +10,9 @@
 //   - 두 손패 앞: 최종 후보는 다음 손패를 놓은 뒤 그다음 손패까지 놓아 본다
 // 실제 계산(lookaheadTotals / lookahead2Totals)은 순수 함수라 여러 Worker에 나눠 맡길 수 있다.
 import { DROP_EVERY, INVENTORY_CAP, type Inventory, type Item, type Rows } from './board';
-import { PIECE_TYPES, type PieceType } from './pieces';
-import { itemValue, solveTop, type Plan, type SolveInput } from './search';
+import type { PieceType } from './pieces';
+import { pickPiece, pieceProbs } from './rules';
+import { itemValue, pointsValue, solveTop, type Plan, type SolveInput } from './search';
 import { DEFAULT_WEIGHTS } from './eval';
 
 export interface LookaheadOptions {
@@ -85,10 +86,11 @@ function rng(seed: number) {
   };
 }
 
-/** 블록 등장 확률이 균등하다고 보고 다음 손패를 뽑는다 */
-export function sampleHands(count: number, seed: number): PieceType[][] {
+/** 지금 단계의 조각 등장 확률(rules.ts)로 다음 손패를 뽑는다 */
+export function sampleHands(count: number, seed: number, stage = 1): PieceType[][] {
   const rand = rng(seed);
-  const pick = () => PIECE_TYPES[Math.floor(rand() * PIECE_TYPES.length)];
+  const probs = pieceProbs(stage);
+  const pick = () => pickPiece(rand, probs);
   return Array.from({ length: count }, () => [pick(), pick(), pick()]);
 }
 
@@ -105,7 +107,22 @@ const FAIL_SCORE = -3000;
 /** 두 손패 앞 계산에서 바로 다음 손패부터 못 놓는 경우 (그다음에 막히는 것보다 나쁘다) */
 const FAIL_FIRST = FAIL_SCORE - 1000;
 
-export type LookaheadBase = Pick<SolveInput, 'weights' | 'maxDots'>;
+export type LookaheadBase = Pick<SolveInput, 'weights' | 'maxDots' | 'stage'>;
+
+/** 다 놓지 못했을 때 벌점 중 바꿔 뽑기가 있으면 덜어 주는 비율 (게임은 보유 능력이 있으면 끝나지 않는다) */
+const SWAP_RESCUE = 0.6;
+const UNPLACED_PENALTY = 1000;
+
+/** 다음 손패 계산 결과의 가치. 다 못 놓아도 바꿔 뽑기가 남아 있으면 바로 끝나지는 않는다 */
+function innerValue(plan: Plan | undefined, hand: PieceType[], st: NextState): number {
+  if (!plan) return FAIL_SCORE;
+  if (plan.complete) return plan.score;
+  if (st.inventory.swap > 0) {
+    const unplaced = hand.length - plan.moves.filter((m) => m.kind === 'piece').length;
+    return Math.max(plan.score + unplaced * UNPLACED_PENALTY * SWAP_RESCUE, FAIL_SCORE);
+  }
+  return Math.max(plan.score, FAIL_SCORE);
+}
 export type InnerOptions = Pick<LookaheadOptions, 'beam' | 'finalists'>;
 
 export interface LookaheadTotals {
@@ -129,6 +146,7 @@ function innerSolve(st: NextState, hand: PieceType[], base: LookaheadBase, opts:
       items: st.items,
       inventory: st.inventory,
       dropIn: st.dropIn,
+      stage: base.stage,
       weights: base.weights,
       // 다음 손패에서도 점 찍기는 1번까지만 고려 (속도)
       maxDots: Math.min(base.maxDots ?? 1, 1),
@@ -151,7 +169,7 @@ export function lookaheadTotals(
   states.forEach((st, i) => {
     for (const hand of hands) {
       const plan = innerSolve(st, hand, base, opts);
-      totals[i] += plan ? Math.max(plan.score, FAIL_SCORE) : FAIL_SCORE;
+      totals[i] += innerValue(plan, hand, st);
       if (plan?.complete) completes[i]++;
     }
   });
@@ -185,10 +203,11 @@ export function lookahead2Totals(
       let sub = 0;
       for (const h2 of hands2) {
         const p2 = innerSolve(st1, h2, base, opts);
-        sub += p2 ? Math.max(p2.score, FAIL_SCORE) : FAIL_SCORE;
+        sub += innerValue(p2, h2, st1);
         if (p2?.complete) pairCompletes[i]++;
       }
-      totals[i] += itemValue(p1.itemsGained.length, p1.dotsUsed, st.inventory, w) + sub / hands2.length;
+      totals[i] +=
+        itemValue(p1.itemsGained.length, p1.dotsUsed, st.inventory, w) + pointsValue(p1.points, w) + sub / hands2.length;
     }
   });
   return { totals, completes, pairCompletes };
@@ -231,7 +250,7 @@ export async function runLookahead(
 ): Promise<Plan> {
   if (plans.length <= 1 || look.candidates <= 1 || look.samples <= 0) return plans[0];
   const w = input.weights ?? DEFAULT_WEIGHTS;
-  const base: LookaheadBase = { weights: input.weights, maxDots: input.maxDots };
+  const base: LookaheadBase = { weights: input.weights, maxDots: input.maxDots, stage: input.stage };
   const inner: InnerOptions = { beam: look.beam, finalists: look.finalists };
   const seed = look.seed ?? seedOf(input.rows, input.hand);
   const seedFor = (k: number) => (seed ^ Math.imul(k + 1, 0x9e3779b9)) >>> 0;
@@ -240,7 +259,9 @@ export async function runLookahead(
   const completes = plans.map(() => 0);
   const counts = plans.map(() => 0);
   const mean = (i: number) => totals[i] / Math.max(1, counts[i]);
-  const value = (i: number) => itemValue(plans[i].itemsGained.length, plans[i].dotsUsed, input.inventory, w) + mean(i);
+  // 이번 손패의 아이템·게임 점수 + 다음 손패 평균 (다음 손패 점수에는 그 손패의 게임 점수도 들어 있다)
+  const own = (p: Plan) => itemValue(p.itemsGained.length, p.dotsUsed, input.inventory, w) + pointsValue(p.points, w);
+  const value = (i: number) => own(plans[i]) + mean(i);
   const topBy = (ids: number[], f: (i: number) => number, k: number) =>
     ids
       .slice()
@@ -249,7 +270,7 @@ export async function runLookahead(
 
   const evaluate = async (ids: number[], samples: number, k: number, stage: string) => {
     onPhase?.({ stage, candidates: ids.length, samples });
-    const hands = sampleHands(samples, seedFor(k));
+    const hands = sampleHands(samples, seedFor(k), input.stage);
     const r = await runner.totals(
       ids.map((i) => states[i]),
       hands,
@@ -284,13 +305,13 @@ export async function runLookahead(
     onPhase?.({ stage: '두 손패 앞', candidates: fin.length, samples: samples * n });
     const r = await runner.totals2(
       fin.map((i) => states[i]),
-      sampleHands(samples, seedFor(200)),
-      sampleHands(n, seedFor(201)),
+      sampleHands(samples, seedFor(200), input.stage),
+      sampleHands(n, seedFor(201), input.stage),
       base,
       inner,
     );
     const v2 = (j: number) =>
-      itemValue(plans[fin[j]].itemsGained.length, plans[fin[j]].dotsUsed, input.inventory, w) + r.totals[j] / samples;
+      own(plans[fin[j]]) + r.totals[j] / samples;
     const j = topBy(
       fin.map((_, k) => k),
       v2,

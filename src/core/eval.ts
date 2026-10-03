@@ -28,6 +28,11 @@ export interface Weights {
   dotCost: number;
   /** 바꿔 뽑기 1회 사용 비용 (기대값 이득이 이보다 커야 추천) */
   swapCost: number;
+  /**
+   * 게임 점수 1점의 가치. 줄 제거 점수가 300×(동시에 지운 줄)²이라 여러 줄을 한 번에 지울수록 크게 이득.
+   * 너무 크면 점수를 노리다 막혀 죽고, 작으면 한 줄씩만 지운다 (scripts/sim.ts로 조정)
+   */
+  points: number;
 }
 
 export const DEFAULT_WEIGHTS: Weights = {
@@ -42,6 +47,7 @@ export const DEFAULT_WEIGHTS: Weights = {
   itemGain: 14.75,
   dotCost: 8.2,
   swapCost: 5.8,
+  points: 0.02,
 };
 
 const POP12 = new Uint8Array(1 << 12);

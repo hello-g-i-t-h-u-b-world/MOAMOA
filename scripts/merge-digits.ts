@@ -42,3 +42,25 @@ for (const set of SETS) {
     console.log(`${set.path} 저장 완료 → 커밋하면 모든 사용자에게 적용됩니다`);
   } else if (total) console.log('(검사만 했습니다. 반영하려면 --write)');
 }
+
+// 받은 조각 통계 (단계 → 조각 → 횟수): 공개되지 않은 등장 확률을 추정하는 데 쓴다 → src/core/piece-stats.json에 더한다
+const STATS_PATH = 'src/core/piece-stats.json';
+const stats: Record<string, Record<string, number>> = JSON.parse(readFileSync(STATS_PATH, 'utf8'));
+let statTotal = 0;
+for (const f of files) {
+  const incoming = JSON.parse(readFileSync(f, 'utf8')).pieceStats as typeof stats | undefined;
+  for (const [stage, counts] of Object.entries(incoming ?? {}))
+    for (const [type, n] of Object.entries(counts)) {
+      if (!/^[1-5]$/.test(stage) || !Number.isInteger(n) || n < 0) continue;
+      (stats[stage] ??= {})[type] = (stats[stage][type] ?? 0) + n;
+      statTotal += n;
+    }
+}
+if (statTotal) {
+  console.log(`\n━━ 받은 조각 통계 (${STATS_PATH}): ${statTotal}개 추가`);
+  for (const [stage, counts] of Object.entries(stats).sort()) {
+    const sum = Object.values(counts).reduce((a, b) => a + b, 0);
+    console.log(`  ${stage}단계 ${sum}개: ${Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([t, n]) => `${t} ${((n / sum) * 100).toFixed(1)}%`).join(' ')}`);
+  }
+  if (write) writeFileSync(STATS_PATH, JSON.stringify(stats, null, 2) + '\n');
+}
