@@ -1,8 +1,9 @@
 // 자가 대국 시뮬레이터 / 가중치 튜너
 //   npm run sim -- --games 20 --beam 60
 //   npm run sim -- --games 24 --look normal --jobs 8   (다음 손패 미리 보기, 8개 프로세스로 나눠 실행)
-//   npm run sim -- --tune 30 --games 12
-import { fork } from 'node:child_process';
+//   npm run sim -- --tune 60 --games 48 --jobs 16   (가중치 튜닝: 매번 새 시드로 지금 가중치와 후보를 짝지어 비교)
+//   npm run sim -- --weights '{"hole1":-3}'          (가중치 일부 덮어쓰기)
+import { fork, type ChildProcess } from 'node:child_process';
 import { BOARD_ITEM_CAP, DROP_EVERY, H, INVENTORY_CAP, W, emptyRows, isFilled, type Inventory, type Item, type Rows } from '../src/core/board';
 import { DEFAULT_WEIGHTS, type Weights } from '../src/core/eval';
 import type { PieceType } from '../src/core/pieces';
@@ -30,8 +31,12 @@ const strArg = (name: string, def: string) => {
 const LOOK = strArg('look', 'off');
 /** 조각 확률을 모든 조각 균등으로 (--uniform 1). 기본은 실제 플레이 통계(piece-stats.json) */
 if (arg('uniform', 0)) setPieceStats({});
-/** 게임 점수 가중치 덮어쓰기 (--points 0.02) */
-const SIM_W: Weights = { ...DEFAULT_WEIGHTS, points: Number(strArg('points', String(DEFAULT_WEIGHTS.points))) };
+/** 게임 점수 가중치 덮어쓰기 (--points 0.02), 가중치 일부 덮어쓰기 (--weights '{"hole1":-3}') */
+const SIM_W: Weights = {
+  ...DEFAULT_WEIGHTS,
+  points: Number(strArg('points', String(DEFAULT_WEIGHTS.points))),
+  ...(JSON.parse(strArg('weights', '{}')) as Partial<Weights>),
+};
 if (LOOK !== 'off' && !(LOOK in LOOKAHEAD_PRESETS)) throw new Error(`--look ${LOOK}?`);
 
 function rng(seed: number) {
@@ -168,7 +173,53 @@ async function runParallel(): Promise<GameResult[]> {
   return parts.flat().sort((a, b) => a.seed - b.seed);
 }
 
-if (arg('child', 0)) {
+/** 계속 살아 있는 자식 프로세스 풀. 먼저 끝난 프로세스가 다음 판을 받는다 (튜닝용) */
+class GamePool {
+  private idle: ChildProcess[] = [];
+  private all: ChildProcess[] = [];
+  private queue: { seed: number; w: Weights; done: (r: GameResult) => void }[] = [];
+  constructor(n: number) {
+    const drop = ['--jobs', '--tune', '--seeds', '--games'];
+    const base = args.filter((a, i) => !drop.includes(a) && !drop.includes(args[i - 1]));
+    for (let i = 0; i < n; i++) {
+      const child = fork(process.argv[1], [...base, '--worker', '1'], { stdio: ['ignore', 'pipe', 'inherit', 'ipc'] });
+      this.all.push(child);
+      this.idle.push(child);
+    }
+  }
+  run(seed: number, w: Weights): Promise<GameResult> {
+    return new Promise((done) => {
+      this.queue.push({ seed, w, done });
+      this.pump();
+    });
+  }
+  runAll(w: Weights, seeds: number[]): Promise<GameResult[]> {
+    return Promise.all(seeds.map((s) => this.run(s, w)));
+  }
+  private pump() {
+    while (this.idle.length && this.queue.length) {
+      const child = this.idle.pop()!;
+      const job = this.queue.shift()!;
+      child.once('message', (m) => {
+        this.idle.push(child);
+        job.done(m as GameResult);
+        this.pump();
+      });
+      child.send({ seed: job.seed, w: job.w });
+    }
+  }
+  close() {
+    for (const c of this.all) c.kill();
+  }
+}
+
+if (arg('worker', 0)) {
+  // GamePool 작업자: { seed, w } 를 받아 한 판 두고 결과를 돌려준다
+  process.on('message', async (m) => {
+    const { seed, w } = m as { seed: number; w: Weights };
+    process.send!(await playGame(seed, w));
+  });
+} else if (arg('child', 0)) {
   for (const s of seeds) process.send!(await playGame(s, SIM_W));
 } else if (!TUNE) {
   const t = performance.now();
@@ -188,22 +239,42 @@ if (arg('child', 0)) {
       `${((performance.now() - t) / 1000).toFixed(1)}s`,
   );
 } else {
-  // 간단한 무작위 언덕 오르기
-  const rand = rng(42);
+  // 무작위 언덕 오르기. 판마다 점수 편차가 커서 같은 시드 묶음으로 평균만 비교하면 우연히 좋게 나온 후보가 뽑힌다.
+  // → 매 회 새 시드 묶음으로 지금 가중치와 후보를 함께 돌려, 짝지은 점수 차이의 t값이 --tune-t 를 넘을 때만 바꾼다.
+  const TUNE_T = arg('tune-t', 1);
+  const pool = new GamePool(Math.max(1, JOBS));
+  const rand = rng(arg('tune-seed', 42));
   let best: Weights = { ...SIM_W };
-  let bestMean = (await evaluate(best, seeds)).mean;
-  console.log('start', bestMean);
-  const keys = Object.keys(best) as (keyof Weights)[];
-  for (let it = 0; it < TUNE; it++) {
+  // filled 는 척도 기준으로 고정 (모든 가중치를 같은 배수로 바꾸면 결과가 같다)
+  const keys = (Object.keys(best) as (keyof Weights)[]).filter((k) => k !== 'filled');
+  const start = arg('tune-start', 0);
+  for (let it = start; it < start + TUNE; it++) {
     const cand = { ...best };
-    for (const k of keys) if (rand() < 0.4) cand[k] = +(cand[k] * (0.6 + rand() * 0.8)).toFixed(3);
-    const m = (await evaluate(cand, seeds)).mean;
-    console.log(it, m.toFixed(1), m > bestMean ? '★' : '');
-    if (m > bestMean) {
-      bestMean = m;
+    const changed: string[] = [];
+    while (!changed.length)
+      for (const k of keys)
+        if (rand() < 0.25) {
+          cand[k] = +(cand[k] * Math.exp((rand() - 0.5) * 0.8)).toPrecision(3); // ×0.67 ~ ×1.49
+          changed.push(`${k} ${best[k]}→${cand[k]}`);
+        }
+    const batch = Array.from({ length: GAMES }, (_, i) => 100000 + it * GAMES + i);
+    const t0 = performance.now();
+    const [a, b] = await Promise.all([pool.runAll(best, batch), pool.runAll(cand, batch)]);
+    const mean = (xs: number[]) => xs.reduce((x, y) => x + y, 0) / xs.length;
+    const d = a.map((r, i) => b[i].score - r.score);
+    const md = mean(d);
+    const sd = Math.sqrt(d.reduce((x, y) => x + (y - md) ** 2, 0) / (d.length - 1));
+    const tv = md / (sd / Math.sqrt(d.length));
+    const ok = tv > TUNE_T;
+    console.log(
+      `[${it}] 지금 ${Math.round(mean(a.map((r) => r.score)))} vs 후보 ${Math.round(mean(b.map((r) => r.score)))} ` +
+        `(차이 ${Math.round(md)}, t=${tv.toFixed(2)})${ok ? ' ★ 채택' : ''} · ${changed.join(', ')} · ${((performance.now() - t0) / 1000).toFixed(0)}s`,
+    );
+    if (ok) {
       best = cand;
-      console.log(JSON.stringify(best));
+      console.log('best ' + JSON.stringify(best));
     }
   }
-  console.log('best', bestMean, JSON.stringify(best, null, 2));
+  pool.close();
+  console.log('최종 ' + JSON.stringify(best, null, 2));
 }

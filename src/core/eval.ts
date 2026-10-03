@@ -35,19 +35,23 @@ export interface Weights {
   points: number;
 }
 
+/**
+ * 실제 통계 확률로 다시 맞춘 값 (sim --tune 40회, 미리 보기 없음·빔 60·48판씩 짝 비교).
+ * 옛 값(균등 확률 기준) 대비 평균 점수 ~7만 → ~13만. 울퉁불퉁함 벌점↑, 바꿔 뽑기는 아껴 쓰고 점 찍기는 쉽게.
+ */
 export const DEFAULT_WEIGHTS: Weights = {
   filled: -1,
-  rowTrans: -0.79,
-  colTrans: -0.425,
-  hole1: -2.55,
-  rowFillSq: 0.212,
-  noFit: -31.6,
-  mobility: 0.67,
-  dead: -2.49,
-  itemGain: 14.75,
-  dotCost: 8.2,
-  swapCost: 5.8,
-  points: 0.02,
+  rowTrans: -1.67,
+  colTrans: -0.579,
+  hole1: -2.69,
+  rowFillSq: 0.222,
+  noFit: -15.8,
+  mobility: 0.621,
+  dead: -2.68,
+  itemGain: 12.2,
+  dotCost: 4.49,
+  swapCost: 13.6,
+  points: 0.0147,
 };
 
 const POP12 = new Uint8Array(1 << 12);
