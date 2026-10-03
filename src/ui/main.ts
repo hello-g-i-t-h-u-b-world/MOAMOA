@@ -25,7 +25,10 @@ import { STAGE_RANGES, linePoints, stageOf } from '../core/rules';
 import {
   DEFAULT_DIGITS,
   DEFAULT_DROP_DIGITS,
+  DEFAULT_NUM_DIGITS,
   matchDigit,
+  matchNumber,
+  readNumberSigs,
   readBoard,
   readDigitSig,
   readHandSlot,
@@ -65,6 +68,8 @@ interface Calib {
   slots: (Rect | null)[];
   /** 보유 능력 버튼의 숫자 영역 / '다음 능력 획득까지' 숫자 영역 (선택) */
   counters: Record<CounterKey, Rect | null>;
+  /** 점수 / 제거한 줄 수 영역 (선택, 여러 자리 숫자) */
+  numbers: Record<NumberKey, Rect | null>;
   /** 영역을 지정할 때의 공유 화면 크기 */
   frame?: { w: number; h: number };
 }
@@ -75,11 +80,18 @@ const ITEM_KEYS: ItemKey[] = ['dot', 'swap'];
 type CounterKey = ItemKey | 'drop';
 const COUNTER_KEYS: CounterKey[] = ['dot', 'swap', 'drop'];
 const NO_COUNTERS: Record<CounterKey, Rect | null> = { dot: null, swap: null, drop: null };
+/** 화면에서 읽는 여러 자리 숫자: 점수 / 제거한 줄 수 */
+type NumberKey = 'score' | 'lines';
+const NUMBER_KEYS: NumberKey[] = ['score', 'lines'];
+const NO_NUMBERS: Record<NumberKey, Rect | null> = { score: null, lines: null };
+const NUMBER_NAME: Record<NumberKey, string> = { score: '점수', lines: '제거한 줄' };
 
 const CALIB_KEY = 'moamoa.calib.v1';
 const DIGITS_KEY = 'moamoa.digits.v2';
 /** '다음 능력 획득까지' 숫자 (글꼴이 달라 따로 학습) */
 const DROP_DIGITS_KEY = 'moamoa.dropdigits.v1';
+/** 점수·제거한 줄 수 숫자 (0~9) */
+const NUM_DIGITS_KEY = 'moamoa.numdigits.v1';
 /** 게임 진행 (제거한 줄 누적 → 단계, 추정 점수) */
 const GAME_KEY = 'moamoa.game.v1';
 /** 실제로 받은 조각 통계 (단계별). 공개되지 않은 등장 확률을 추정하는 데 쓴다 */
@@ -122,8 +134,14 @@ const state = {
   dropDigits: loadDigitStore(DROP_DIGITS_KEY, DEFAULT_DROP_DIGITS),
   /** 다음 아이템이 떨어질 때까지 남은 블록 수 (1~7, 모르면 null) */
   dropIn: null as number | null,
-  /** 제거한 가로줄 누적 / 추정 점수 (화면 공유로 본 변화로 센다. 중간부터 시작했으면 직접 고친다) */
+  /** 제거한 가로줄 누적 / 점수 (화면에서 읽는다. 줄 수 영역이 없으면 직접 입력) */
   game: loadJson(GAME_KEY, { lines: 0, score: 0 }),
+  numDigits: loadDigitStore(NUM_DIGITS_KEY, DEFAULT_NUM_DIGITS),
+  /** 계산 중이면 계산을 시작할 때의 판 (계산이 끝날 때까지 판 화면을 이 상태로 멈춘다) */
+  computing: null as { rows: Rows; colors: (string | null)[][]; items: Item[]; phase: string } | null,
+  numFromScreen: { score: false, lines: false } as Record<NumberKey, boolean>,
+  /** 처음 보는 글자가 있는 숫자 → 화면의 숫자를 그대로 입력받아 글자마다 배운다 */
+  numPrompt: { score: null, lines: null } as Record<NumberKey, { sigs: DigitSig[]; url: string } | null>,
   /** 단계 → 조각 → 받은 횟수 */
   pieceStats: loadJson(PIECE_STATS_KEY, {} as Record<string, Record<string, number>>),
   /** 화면에서 개수를 읽고 있는가 */
@@ -137,12 +155,16 @@ function loadCalib(): Calib {
     const raw = localStorage.getItem(CALIB_KEY);
     if (raw) {
       const saved = JSON.parse(raw) as Partial<Calib>;
-      return { ...saved, counters: { ...NO_COUNTERS, ...saved.counters } } as Calib;
+      return {
+        ...saved,
+        counters: { ...NO_COUNTERS, ...saved.counters },
+        numbers: { ...NO_NUMBERS, ...saved.numbers },
+      } as Calib;
     }
   } catch {
     /* 저장소 사용 불가 */
   }
-  return { board: null, slots: [null, null, null], counters: { ...NO_COUNTERS } };
+  return { board: null, slots: [null, null, null], counters: { ...NO_COUNTERS }, numbers: { ...NO_NUMBERS } };
 }
 
 function loadJson<T>(key: string, fallback: T): T {
@@ -167,16 +189,35 @@ function currentStage(): number {
   return stageOf(state.game.lines);
 }
 
-/** 화면에서 본 변화(줄 제거·배치)를 게임 진행에 더한다 */
-function addProgress(cleared: number, points: number) {
-  if (!cleared && !points) return;
+/** 화면에서 읽은 제거한 줄 수·점수를 반영한다 */
+function setGameNumber(key: NumberKey, value: number) {
+  if (state.game[key] === value && state.numFromScreen[key]) return;
   const before = currentStage();
-  state.game.lines += cleared;
-  state.game.score += points;
+  state.game[key] = value;
+  state.numFromScreen[key] = true;
   saveJson(GAME_KEY, state.game);
   const after = currentStage();
-  if (after !== before)
-    addLog(`▲ ${after}단계 진입 (누적 ${state.game.lines}줄) · 칸 수가 적은 조각이 덜 나옵니다`);
+  if (key === 'lines' && after !== before) {
+    addLog(`▲ ${after}단계 (누적 ${value}줄) · ${after > before ? '칸 수가 적은 조각이 덜 나옵니다' : ''}`);
+    if (!state.locked && state.plan) requestSolve(!!source);
+  }
+}
+
+/** 처음 보는 글자가 있던 숫자를 사용자가 알려준 값으로 배운다 */
+function learnNumber(key: NumberKey, sigs: DigitSig[], text: string): string | null {
+  const digits = text.replace(/[^0-9]/g, '');
+  if (digits.length !== sigs.length)
+    return `숫자 ${sigs.length}자리로 읽혔는데 ${digits.length}자리를 입력했습니다. 화면의 숫자를 그대로 입력하세요 (쉼표는 빼도 됩니다).`;
+  sigs.forEach((sig, i) => {
+    const list = (state.numDigits[digits[i]] ??= []);
+    if (!list.includes(sig)) list.push(sig);
+  });
+  saveJson(NUM_DIGITS_KEY, state.numDigits);
+  numSmoothers[key].set(Number(digits));
+  state.numPrompt[key] = null;
+  setGameNumber(key, Number(digits));
+  addLog(`${NUMBER_NAME[key]} 숫자 학습: ${Number(digits).toLocaleString()}`);
+  return null;
 }
 
 /** 새로 받은 조각을 단계별로 센다 (바꿔 뽑기로 받은 조각 포함) */
@@ -250,7 +291,10 @@ function timestamp(): string {
 
 /** 학습한 숫자(기본 내장 제외)를 파일로 내보낸다 */
 function exportDigits() {
-  const data = { ...makeExport(state.digits, DEFAULT_DIGITS, state.dropDigits, DEFAULT_DROP_DIGITS), pieceStats: state.pieceStats };
+  const data = {
+    ...makeExport(state.digits, DEFAULT_DIGITS, state.dropDigits, DEFAULT_DROP_DIGITS, state.numDigits, DEFAULT_NUM_DIGITS),
+    pieceStats: state.pieceStats,
+  };
   const name = `moamoa-digits-${timestamp()}.json`;
   downloadJson(data, name);
   const drop = Object.keys(data.dropDigits ?? {}).sort();
@@ -263,9 +307,11 @@ function exportDigits() {
 function resetDigits() {
   state.digits = structuredClone(DEFAULT_DIGITS);
   state.dropDigits = structuredClone(DEFAULT_DROP_DIGITS);
+  state.numDigits = structuredClone(DEFAULT_NUM_DIGITS);
   try {
     localStorage.removeItem(DIGITS_KEY);
     localStorage.removeItem(DROP_DIGITS_KEY);
+    localStorage.removeItem(NUM_DIGITS_KEY);
   } catch {
     /* 무시 */
   }
@@ -312,6 +358,10 @@ const pool = new SolverPool();
 let reqId = 0;
 
 let lockAfterSolve = false;
+/** 능력 드롭을 기다리는 중: 이 시각까지 새 아이템이 확인되지 않으면 포기 (아래 '능력 드롭 확인' 참고) */
+let dropWatch: { since: number; until: number } | null = null;
+/** 추천 고정 중에 능력이 떨어져 다시 계산해야 함 */
+let dropRecompute = false;
 
 function effortSetting() {
   const key = ($('effort') as HTMLSelectElement).value as keyof typeof EFFORT;
@@ -319,6 +369,7 @@ function effortSetting() {
 }
 
 function requestSolve(fromScreen = false) {
+  dropRecompute = false; // 지금 화면 기준으로 계산하므로 떨어진 능력도 반영된다
   lockAfterSolve = fromScreen && state.lockEnabled;
   state.locked = false;
   const effort = effortSetting();
@@ -337,11 +388,15 @@ function requestSolve(fromScreen = false) {
   state.swaps = null;
   if (input.hand.every((h) => h === null)) {
     state.plan = null;
+    state.computing = null;
     renderAll();
     setStatus('보유 조각 없음', 'idle');
     return;
   }
   setStatus('계산 중…', 'busy');
+  state.computing = { rows: state.rows.slice(), colors: state.colors.map((r) => r.slice()), items: state.items.slice(), phase: '' };
+  renderBoard();
+  renderMoves();
   const id = ++reqId;
   planReqId = id;
   swapReqId = id;
@@ -349,8 +404,12 @@ function requestSolve(fromScreen = false) {
   const t0 = performance.now();
   pool
     .plan(input, effort.look, (p) => {
-      if (id === planReqId)
-        setStatus(`계산 중… [${p.stage}] 후보 ${p.candidates}개 × 다음 손패 ${p.samples}가지 미리 보는 중 (코어 ${pool.size}개)`, 'busy');
+      if (id !== planReqId) return;
+      setStatus(`계산 중… [${p.stage}] 후보 ${p.candidates}개 × 다음 손패 ${p.samples}가지 미리 보는 중 (코어 ${pool.size}개)`, 'busy');
+      if (state.computing) {
+        state.computing.phase = `${p.stage} · 후보 ${p.candidates}개 × 다음 손패 ${p.samples}가지`;
+        renderOverlay();
+      }
     })
     .then((plan) => {
       if (id !== planReqId) return;
@@ -365,11 +424,14 @@ let swapReqId = 0;
 
 function onSolveError(err: unknown) {
   if (err instanceof Cancelled) return;
+  state.computing = null;
+  renderAll();
   console.error(err);
   setStatus(`계산 오류: ${String(err)}`, 'warn');
 }
 
 function onPlan(plan: Plan | null, ms: number, base: { rows: Rows; used: boolean[] }) {
+  state.computing = null;
   state.plan = plan;
   state.solveMs = ms;
   state.planBase = base;
@@ -512,11 +574,24 @@ boardEl.addEventListener('contextmenu', (e) => {
   requestSolve();
 });
 
+/** 계산 중 안내 (판 위) */
+function renderOverlay() {
+  const el = $('boardOverlay');
+  const c = state.computing;
+  el.hidden = !c;
+  if (c) el.innerHTML = `<div class="spinner"></div><b>계산 중…</b>${c.phase ? `<small>${c.phase}</small>` : ''}`;
+}
+
 function renderBoard() {
+  renderOverlay();
   renderNowStep();
-  const plan = state.plan;
+  // 계산 중: 계산을 시작할 때의 판을 그대로 보여준다 (이전 추천은 지금 판과 맞지 않으므로 숨김)
+  const frozen = state.computing;
+  const plan = frozen ? null : state.plan;
   const before = plan ? boardsBeforeMoves(plan) : [];
-  const base = plan && typeof state.view === 'number' ? before[state.view] : state.rows;
+  const base = frozen ? frozen.rows : plan && typeof state.view === 'number' ? before[state.view] : state.rows;
+  const items = frozen ? frozen.items : state.items;
+  const colors = frozen ? frozen.colors : state.colors;
   const ghost = new Map<string, number>();
   const clearRows = new Set<number>();
   if (plan) {
@@ -531,8 +606,8 @@ function renderBoard() {
       const el = cellEls[r][c];
       const filled = ((base[r] >> c) & 1) === 1;
       const g = ghost.get(`${r},${c}`);
-      const item = state.items.find((it) => it.r === r && it.c === c);
-      const color = state.colors[r]?.[c] ?? 'gray';
+      const item = items.find((it) => it.r === r && it.c === c);
+      const color = colors[r]?.[c] ?? 'gray';
       el.className = 'cell';
       el.textContent = '';
       if (filled) el.classList.add('filled', `c-${color}`);
@@ -549,6 +624,7 @@ function renderBoard() {
 
   const tabs = $('stepTabs');
   tabs.innerHTML = '';
+  tabs.hidden = !!frozen;
   if (!plan) return;
   const mk = (label: string, v: 'all' | number) => {
     const b = document.createElement('button');
@@ -568,7 +644,7 @@ function renderBoard() {
 /** 보드 위 '지금 할 일' 안내 */
 function renderNowStep() {
   const el = $('nowStep');
-  const plan = state.plan;
+  const plan = state.computing ? null : state.plan;
   el.innerHTML = '';
   el.hidden = !plan || plan.moves.length === 0;
   if (!plan || el.hidden) return;
@@ -638,6 +714,10 @@ function renderMoves() {
   const plan = state.plan;
   const verdict = $('verdict');
   verdict.innerHTML = '';
+  if (state.computing) {
+    ol.innerHTML = '<li class="muted">계산 중… 끝나면 1단계부터 안내합니다.</li>';
+    return;
+  }
   if (!plan) {
     ol.innerHTML = '<li class="muted">보유 조각을 입력하거나 화면 공유를 시작하세요.</li>';
     return;
@@ -820,7 +900,8 @@ function renderInventory() {
   // 숫자 학습 현황 + 초기화 (숫자 영역을 지정했거나 학습한 숫자가 있을 때만)
   const learned = learnedDigits(state.digits, DEFAULT_DIGITS);
   const learnedDrop = learnedDigits(state.dropDigits, DEFAULT_DROP_DIGITS);
-  const anyLearned = learned.length + learnedDrop.length > 0;
+  const learnedNum = learnedDigits(state.numDigits, DEFAULT_NUM_DIGITS);
+  const anyLearned = learned.length + learnedDrop.length + learnedNum.length > 0;
   const stageCounts = Object.entries(state.pieceStats)
     .map(([st, c]) => [st, Object.values(c).reduce((a, b) => a + b, 0)] as const)
     .filter(([, n]) => n > 0)
@@ -836,6 +917,7 @@ function renderInventory() {
     text.textContent =
       `학습한 숫자 · 보유 개수: ${learned.join(', ') || '없음'} (기본 내장: ${builtin})` +
       ` · 획득까지: ${learnedDrop.join(', ') || '없음'} (기본 내장: ${builtinDrop})` +
+      ` · 점수·줄: ${learnedNum.join(', ') || '없음'}` +
       ` · 받은 조각 ${stageCounts.map(([st, n]) => `${st}단계 ${n}개`).join(', ') || '없음'}`;
     const exp = document.createElement('button');
     exp.textContent = '학습 데이터 내보내기';
@@ -867,7 +949,9 @@ function renderGameRow(): HTMLElement {
   input.type = 'number';
   input.min = '0';
   input.value = String(state.game.lines);
-  input.title = '게임 화면의 누적 줄 수와 다르면 고치세요 (단계 = 조각 등장 확률)';
+  input.title = state.calib.numbers.lines
+    ? '화면에서 읽은 값입니다 (틀리면 고칠 수 있지만 화면 값으로 다시 바뀝니다)'
+    : "'영역 지정'에서 제거한 줄 숫자 영역을 지정하면 화면에서 읽습니다. 지정하지 않으면 직접 입력하세요 (단계 = 조각 등장 확률)";
   input.onchange = () => {
     const before = stage;
     state.game.lines = Math.max(0, Math.round(Number(input.value) || 0));
@@ -881,12 +965,46 @@ function renderGameRow(): HTMLElement {
   st.textContent = `${stage}단계`;
   st.title = `${STAGE_RANGES[stage - 1]} · 단계가 오를수록 칸 수가 적은 조각이 덜 나옵니다`;
   lines.appendChild(st);
+  if (state.numFromScreen.lines) {
+    const tag = document.createElement('small');
+    tag.className = 'tag';
+    tag.textContent = '화면';
+    lines.appendChild(tag);
+  }
   const score = document.createElement('div');
   score.className = 'muted';
-  const pct = Math.min(100, (state.game.score / TARGET_SCORE) * 100);
-  score.innerHTML = `추정 점수 <b>${state.game.score.toLocaleString()}</b> / ${TARGET_SCORE.toLocaleString()} (${pct.toFixed(1)}%)`;
-  score.title = '화면 공유로 본 배치·줄 제거·능력 획득으로 센 값입니다. 중간부터 보기 시작했으면 실제보다 적습니다.';
+  if (state.calib.numbers.score) {
+    const pct = Math.min(100, (state.game.score / TARGET_SCORE) * 100);
+    score.innerHTML = state.numFromScreen.score
+      ? `점수 <b>${state.game.score.toLocaleString()}</b> / ${TARGET_SCORE.toLocaleString()} (${pct.toFixed(1)}%)`
+      : '점수: 화면에서 읽는 중…';
+  } else score.textContent = `점수: '영역 지정'에서 점수 숫자 영역을 지정하면 화면에서 읽습니다 (목표 ${TARGET_SCORE.toLocaleString()})`;
   box.append(lines, score);
+  for (const k of NUMBER_KEYS) {
+    const prompt = state.numPrompt[k];
+    if (!prompt) continue;
+    const q = document.createElement('div');
+    q.className = 'digit-prompt';
+    q.innerHTML = `<img src="${prompt.url}" alt="" /><span>${NUMBER_NAME[k]}에 처음 보는 숫자가 있습니다. 화면의 숫자를 그대로 입력하세요.</span>`;
+    const form = document.createElement('form');
+    form.className = 'num-form';
+    const field = document.createElement('input');
+    field.inputMode = 'numeric';
+    field.placeholder = `${prompt.sigs.length}자리`;
+    const ok = document.createElement('button');
+    ok.textContent = '학습';
+    const err = document.createElement('small');
+    err.className = 'warn';
+    form.onsubmit = (e) => {
+      e.preventDefault();
+      const msg = learnNumber(k, prompt.sigs, field.value);
+      if (msg) err.textContent = msg;
+      else renderInventory();
+    };
+    form.append(field, ok, err);
+    q.appendChild(form);
+    box.appendChild(q);
+  }
   return box;
 }
 
@@ -1044,8 +1162,9 @@ function tick() {
   if (!calibReady() || state.paused) return;
   if (!checkFrameSize(frame)) return;
   const now = performance.now();
-  // 보유 능력 개수는 보드·손패와 상관없이 매 순간 읽어 바로 반영한다
+  // 보유 능력 개수·점수·줄 수는 보드·손패와 상관없이 매 순간 읽어 바로 반영한다
   updateCounters(frame, now);
+  updateNumbers(frame, now);
 
   const slots = state.calib.slots.map((r) => readHandSlot(frame, r!));
   // 게임에서 조각을 클릭해 선택(노란 카드)한 동안에는 화면을 반영하지도, 계산하지도 않는다.
@@ -1072,6 +1191,7 @@ function tick() {
       } else lastColors[r][c] = null;
   // 1초 이상 같은 자리에 보인 아이템만 인정 (줄 제거 번쩍임 등 걸러냄)
   const items = itemConfirmer.update(b.items, now);
+  watchDrops(items, now);
   recordFrame(frame, now, { selected: false, hand: slots, raw: rawRows, rows: b.rows, items });
   const sig =
     b.rows.join(',') +
@@ -1108,18 +1228,22 @@ function tick() {
     setStatus('⏳ 화면이 안정되길 기다리는 중…', 'busy');
     return;
   }
+  // 능력이 떨어질 차례였다면, 떨어진 능력을 확인한 다음에 계산한다
+  if ((!state.locked || newBlocks || progress.kind === 'deviated') && dropWatch) {
+    setStatus('⏳ 떨어진 능력 확인 중…', 'busy');
+    return;
+  }
   appliedSig = sig;
 
   const res = track(prevSnap, snap, live.items, state.inventory);
   if (!prevSnap) {
     // 화면을 처음 반영할 때 이미 있던 아이템은 '드롭'으로 보지 않는다
-    knownItems = new Set(res.items.map(itemKey));
+    knownItems = new Map(res.items.map((it) => [itemKey(it), 0]));
     dropsPrimed = true;
   }
   if (prevSnap && newBlocks) countPieces(prevSnap, snap);
   prevSnap = snap;
   res.events.forEach(addLog);
-  addProgress(res.cleared, res.points);
   if (slots.some((s) => s.unknown)) addLog('인식할 수 없는 조각이 있습니다 (영역을 확인하세요)');
 
   live.rows = b.rows;
@@ -1132,6 +1256,13 @@ function tick() {
 
   // 추천 고정 중: 안내대로 놓으면 다음 단계로, 다르게 놓으면 남은 조각으로 다시 계산
   if (state.locked && !newBlocks) {
+    if (dropRecompute && live.hand.some((h) => !h.used && h.type)) {
+      dropRecompute = false;
+      addLog('능력이 새로 떨어져 남은 조각으로 다시 계산합니다');
+      applyLive();
+      requestSolve(true);
+      return;
+    }
     if (progress.kind === 'deviated') {
       addLog(`추천과 다르게 놓아서 남은 조각으로 다시 계산합니다 (${progress.reason})`);
       applyLive();
@@ -1152,6 +1283,43 @@ function tick() {
  * - 추천 고정 중: 계획은 그대로, 바꿔 뽑기 개수가 바뀌면 바꿔 뽑기 분석만 다시 한다
  * - 고정 아님: 개수가 바뀌면 다시 계산한다
  */
+const numSmoothers: Record<NumberKey, CountSmoother> = { score: new CountSmoother(), lines: new CountSmoother() };
+/** 숫자 모양 문자열 → 글자별 모양 (처음 보는 숫자를 물어볼 때 쓴다) */
+const numSigCache: Record<NumberKey, Map<string, DigitSig[]>> = { score: new Map(), lines: new Map() };
+
+/** 점수·제거한 줄 수를 화면에서 읽는다 (매 프레임, 같은 값이 0.6초 이어질 때만 반영) */
+function updateNumbers(frame: Frame & { image: CanvasImageSource }, now: number) {
+  let changed = false;
+  for (const k of NUMBER_KEYS) {
+    const rect = state.calib.numbers[k];
+    if (!rect) continue;
+    const sigs = readNumberSigs(frame, rect);
+    const key = sigs ? sigs.join('/') : '';
+    if (sigs) {
+      const cache = numSigCache[k];
+      cache.set(key, sigs);
+      if (cache.size > 50) cache.delete(cache.keys().next().value!);
+    }
+    const c = numSmoothers[k].update(sigs ? { sig: key, value: matchNumber(sigs, state.numDigits) } : null, now);
+    if (c.value != null && (c.value !== state.game[k] || !state.numFromScreen[k])) {
+      setGameNumber(k, c.value);
+      changed = true;
+    }
+    if (c.value != null && state.numPrompt[k] && matchNumber(state.numPrompt[k]!.sigs, state.numDigits) !== null) {
+      state.numPrompt[k] = null;
+      changed = true;
+    }
+    if (c.unknownSig && state.numPrompt[k]?.sigs.join('/') !== c.unknownSig) {
+      const unknown = numSigCache[k].get(c.unknownSig);
+      if (unknown) {
+        state.numPrompt[k] = { sigs: unknown, url: cropUrl(frame, rect) };
+        changed = true;
+      }
+    }
+  }
+  if (changed) renderInventory();
+}
+
 function updateCounters(frame: Frame & { image: CanvasImageSource }, now: number) {
   const reads = readCounters(frame);
   const changed: ItemKey[] = [];
@@ -1162,6 +1330,8 @@ function updateCounters(frame: Frame & { image: CanvasImageSource }, now: number
     if (k === 'drop') {
       // '다음 능력 획득까지'는 블록을 놓을 때마다 바뀌므로 다시 계산하지 않고 값만 기억한다 (다음 계산 때 반영)
       if (c.value != null && (state.dropIn !== c.value || !state.countFromScreen.drop)) {
+        // 숫자가 다시 올라갔다(1 → 7) = 방금 블록을 놓아 능력이 떨어질 차례 → 판에서 새 능력을 찾는다
+        if (state.countFromScreen.drop && state.dropIn !== null && c.value > state.dropIn) startDropWatch(now);
         state.dropIn = c.value;
         state.countFromScreen.drop = true;
         promptChanged = true;
@@ -1247,6 +1417,7 @@ function leaveSelectionPause() {
   const paused = performance.now() - selectionPausedAt;
   itemConfirmer.shift(paused);
   boardFilter.shift(paused);
+  if (dropWatch) dropWatch.until += paused;
   // 선택 중에 쌓인 '같은 화면' 판정을 버리고 지금 화면부터 다시 안정 여부를 본다
   lastSig = '';
   stable = 0;
@@ -1284,7 +1455,11 @@ function resetRecognition() {
   countSmoothers.dot.reset();
   countSmoothers.swap.reset();
   countSmoothers.drop.reset();
+  numSmoothers.score.reset();
+  numSmoothers.lines.reset();
   dropsPrimed = false;
+  dropWatch = null;
+  dropRecompute = false;
 }
 
 // ───────────── 공유 화면 크기 확인 ─────────────
@@ -1307,6 +1482,7 @@ function checkFrameSize(frame: Frame): boolean {
     c.board = scale(c.board);
     c.slots = c.slots.map(scale);
     c.counters = { dot: scale(c.counters.dot), swap: scale(c.counters.swap), drop: scale(c.counters.drop) };
+    c.numbers = { score: scale(c.numbers.score), lines: scale(c.numbers.lines) };
     addLog(`공유 화면 크기가 ${c.frame.w}×${c.frame.h} → ${frame.width}×${frame.height}로 바뀌어 영역을 비율대로 맞췄습니다`);
     c.frame = { w: frame.width, h: frame.height };
     saveCalib();
@@ -1339,7 +1515,7 @@ let lastRecordAt = 0;
 
 /** 보드·보유 조각·개수 영역을 모두 포함하는 사각형 */
 function recordArea(frame: Frame): Rect {
-  const rects = [state.calib.board, ...state.calib.slots, ...COUNTER_KEYS.map((k) => state.calib.counters[k])].filter(
+  const rects = [state.calib.board, ...state.calib.slots, ...COUNTER_KEYS.map((k) => state.calib.counters[k]), ...NUMBER_KEYS.map((k) => state.calib.numbers[k])].filter(
     (r): r is Rect => !!r,
   );
   const m = 12;
@@ -1412,6 +1588,8 @@ function saveCapture() {
     // 학습한 숫자도 함께 (scripts/merge-digits.ts로 기본값에 합칠 수 있음)
     digits: learnedOnly(state.digits, DEFAULT_DIGITS),
     dropDigits: learnedOnly(state.dropDigits, DEFAULT_DROP_DIGITS),
+    numDigits: learnedOnly(state.numDigits, DEFAULT_NUM_DIGITS),
+    game: state.game,
     frames,
   };
   const name = `moamoa-${timestamp()}.json`;
@@ -1421,29 +1599,86 @@ function saveCapture() {
 
 setInterval(tick, 250);
 
-// ───────────── 능력 드롭 확인 (1초마다) ─────────────
+// ───────────── 능력 드롭 확인 ─────────────
+// 능력은 블록 7번 배치마다 떨어진다. '능력 획득까지' 숫자를 화면에서 읽고 있으면 그 숫자가 다시 올라가는 순간(드롭 시점)에만
+// 판에서 새 능력을 찾고, 찾을 때까지 계산을 미룬다. 숫자를 못 읽으면 예전처럼 1초마다 판을 확인한다.
 
 const itemKey = (it: Item) => `${it.r},${it.c},${it.type}`;
 /** 새로 떨어진 아이템 → 처음 본 시각 (보드에서 깜빡임 표시) */
 const newDrops = new Map<string, number>();
 const NEW_DROP_MS = 5000;
-let knownItems = new Set<string>();
+/** 알고 있는 아이템 → 처음 확인한 시각 */
+let knownItems = new Map<string, number>();
 /** 화면을 처음 반영했는가 (그때 있던 아이템이 기준) */
 let dropsPrimed = false;
+/** 드롭 시점부터 새 능력이 보일 때까지 기다리는 최대 시간 (아이콘이 1초 이상 보여야 인정하므로 여유 있게) */
+const DROP_WAIT_MS = 3500;
 
+/** 드롭 시점을 '능력 획득까지' 숫자로 알 수 있는가 */
+function timedDrops(): boolean {
+  return !!state.calib.counters.drop && state.countFromScreen.drop;
+}
+
+function startDropWatch(now: number) {
+  if (state.inventory.dot + state.inventory.swap >= INVENTORY_CAP) {
+    addLog('능력 드롭 차례지만 7개 보유 중이라 생기지 않습니다');
+    return;
+  }
+  dropWatch = { since: now, until: now + DROP_WAIT_MS };
+}
+
+function addDrop(it: Item, now: number) {
+  newDrops.set(itemKey(it), now);
+  addLog(`${it.type === 'dot' ? '⊙ 점 찍기' : '⇄ 바꿔 뽑기'} 드롭: ${it.r + 1}행 ${it.c + 1}열`);
+}
+
+/** 매 프레임: 드롭을 기다리는 중이면 새로 확인된 아이템을 찾는다 */
+function watchDrops(items: Item[], now: number) {
+  if (!timedDrops() || !dropsPrimed) return;
+  if (!dropWatch) {
+    // 드롭 시점이 아닐 때 보이는 아이템은 기준으로만 기억한다
+    const next = new Map<string, number>();
+    for (const it of items) next.set(itemKey(it), knownItems.get(itemKey(it)) ?? now);
+    knownItems = next;
+    return;
+  }
+  // 드롭 직전에 막 확인된 아이템도 이번 드롭일 수 있다 (숫자 인식이 아이콘 확인보다 늦을 때)
+  const fresh = items.filter((it) => {
+    const t = knownItems.get(itemKey(it));
+    return t === undefined || t > dropWatch!.since - 1500;
+  });
+  if (fresh.length) {
+    for (const it of fresh) addDrop(it, now);
+    for (const it of items) if (!knownItems.has(itemKey(it))) knownItems.set(itemKey(it), now);
+    dropWatch = null;
+    if (state.locked) {
+      state.items = items.slice();
+      dropRecompute = true;
+      // 고정 중에는 화면 변화가 없을 수 있으므로 다음 프레임에서 바로 반영하게 한다
+      appliedSig = '';
+    }
+    renderBoard();
+    renderInventory();
+  } else if (now > dropWatch.until) {
+    addLog('능력 드롭 시점이었지만 새 능력을 찾지 못했습니다 (가려졌거나 이미 반영됨)');
+    dropWatch = null;
+  }
+}
+
+/** 1초마다: 깜빡임 표시 정리, 고정 중 보드의 아이템 표시 갱신. 드롭 시점을 모를 때만 여기서 새 능력을 찾는다 */
 function checkDrops() {
   if (!source || !calibReady() || state.paused) return;
   const now = performance.now();
-  const cur = new Set(live.items.map(itemKey));
   if (!dropsPrimed) return;
   let changed = false;
-  for (const it of live.items) {
-    if (knownItems.has(itemKey(it))) continue;
-    newDrops.set(itemKey(it), now);
-    addLog(`${it.type === 'dot' ? '⊙ 점 찍기' : '⇄ 바꿔 뽑기'} 드롭: ${it.r + 1}행 ${it.c + 1}열`);
-    changed = true;
+  if (!timedDrops()) {
+    for (const it of live.items) {
+      if (knownItems.has(itemKey(it))) continue;
+      addDrop(it, now);
+      changed = true;
+    }
+    knownItems = new Map(live.items.map((it) => [itemKey(it), knownItems.get(itemKey(it)) ?? now]));
   }
-  knownItems = cur;
   for (const [k, t] of newDrops)
     if (now - t > NEW_DROP_MS) {
       newDrops.delete(k);
@@ -1452,6 +1687,7 @@ function checkDrops() {
   // 추천 고정 중: 블록·추천은 그대로 두고 보드의 아이템 표시만 갱신한다
   if (state.locked) {
     const shown = new Set(state.items.map(itemKey));
+    const cur = new Set(live.items.map(itemKey));
     if (shown.size !== cur.size || [...cur].some((k) => !shown.has(k))) {
       state.items = live.items.slice();
       changed = true;
@@ -1561,7 +1797,7 @@ $('btnLock').onclick = () => {
 
 // ───────────── 영역 지정 ─────────────
 
-const TARGETS = ['보드', '조각 1', '조각 2', '조각 3', '점 찍기 개수', '바꿔 뽑기 개수', '능력 획득까지'] as const;
+const TARGETS = ['보드', '조각 1', '조각 2', '조각 3', '점 찍기 개수', '바꿔 뽑기 개수', '능력 획득까지', '점수', '제거한 줄'] as const;
 const TARGET_HELP = [
   '보드 격자(10×16)를 대략 드래그하면 격자선에 자동으로 맞춥니다. 칸마다 찍힌 점이 각 칸 가운데에 오는지 확인하세요.',
   '1번 보유 조각의 흰 영역(블록 그림만, 글자·버튼 제외)을 드래그하세요.',
@@ -1570,6 +1806,8 @@ const TARGET_HELP = [
   '(선택) 점 찍기 버튼 오른쪽 숫자 동그라미를 드래그하세요.',
   '(선택) 바꿔 뽑기 버튼 오른쪽 숫자 동그라미를 드래그하세요.',
   "(선택) '다음 능력 획득까지 N번'에서 숫자 N만 드래그하세요 ('번' 글자는 빼고). 아이템이 사라지는 시점을 계산에 씁니다.",
+  '(선택) 게임 점수의 숫자 부분만 드래그하세요 (글자·아이콘은 빼고, 자릿수가 늘어날 것을 생각해 오른쪽/왼쪽 여유를 두세요).',
+  '(선택) 제거한 줄 수의 숫자 부분만 드래그하세요. 단계(조각 등장 확률)를 정하는 데 씁니다.',
 ];
 let calibTarget = 0;
 const preview = $<HTMLCanvasElement>('preview');
@@ -1579,6 +1817,7 @@ let drag: { x0: number; y0: number; x1: number; y1: number } | null = null;
 function getRect(i: number): Rect | null {
   if (i === 0) return state.calib.board;
   if (i <= 3) return state.calib.slots[i - 1];
+  if (i >= 4 + COUNTER_KEYS.length) return state.calib.numbers[NUMBER_KEYS[i - 4 - COUNTER_KEYS.length]];
   return state.calib.counters[COUNTER_KEYS[i - 4]];
 }
 function setRect(i: number, r: Rect) {
@@ -1586,6 +1825,7 @@ function setRect(i: number, r: Rect) {
   if (preview.width && preview.height) state.calib.frame = { w: preview.width, h: preview.height };
   if (i === 0) state.calib.board = r;
   else if (i <= 3) state.calib.slots[i - 1] = r;
+  else if (i >= 4 + COUNTER_KEYS.length) state.calib.numbers[NUMBER_KEYS[i - 4 - COUNTER_KEYS.length]] = r;
   else state.calib.counters[COUNTER_KEYS[i - 4]] = r;
   saveCalib();
 }

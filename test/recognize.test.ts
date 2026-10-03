@@ -4,7 +4,7 @@ import { PNG } from 'pngjs';
 import { describe, expect, it } from 'vitest';
 import { rowsToStrings } from '../src/core/board';
 import { readBoard, readHandSlot, type Frame } from '../src/capture/recognize';
-import { DEFAULT_DIGITS, matchDigit, readCell, readDigitSig, snapBoardRect } from '../src/capture/recognize';
+import { DEFAULT_DIGITS, matchDigit, matchNumber, readCell, readDigitSig, readNumberSigs, snapBoardRect } from '../src/capture/recognize';
 import type { PieceType } from '../src/core/pieces';
 
 const load = (name: string): Frame => {
@@ -368,5 +368,58 @@ describe("'다음 능력 획득까지' 숫자 (진한 글꼴)", () => {
   it('학습하면 그 숫자로 읽는다', () => {
     const sig = readDigitSig(f, { x: 56, y: 306, w: 10, h: 16 }, 'dark')!;
     expect(matchDigit(sig, { '4': [sig] })).toBe(4);
+  });
+});
+
+describe('여러 자리 숫자 (점수·제거한 줄 수)', () => {
+  const FONT: Record<string, string[]> = {
+    '0': ['.####.', '##..##', '##..##', '##..##', '##..##', '##..##', '##..##', '.####.'],
+    '1': ['..##', '.###', '####', '..##', '..##', '..##', '..##', '..##'],
+    '2': ['.####.', '##..##', '....##', '...##.', '..##..', '.##...', '##....', '######'],
+    '3': ['.####.', '##..##', '....##', '..###.', '....##', '....##', '##..##', '.####.'],
+    '4': ['...##.', '..###.', '.####.', '##.##.', '######', '...##.', '...##.', '...##.'],
+    '8': ['.####.', '##..##', '##..##', '.####.', '##..##', '##..##', '##..##', '.####.'],
+    ',': ['..', '..', '..', '..', '..', '..', '##', '.#'],
+  };
+  /** 흰 바탕에 진한 글자로 숫자를 그린다 (scale배 크기) */
+  const draw = (text: string, scale = 1): Frame => {
+    const width = 90 * scale, height = 14 * scale;
+    const data = new Uint8Array(width * height * 4).fill(255);
+    let x = 3;
+    for (const ch of text) {
+      const g = FONT[ch];
+      g.forEach((row, r) => {
+        for (let c = 0; c < row.length; c++)
+          if (row[c] === '#')
+            for (let dy = 0; dy < scale; dy++)
+              for (let dx = 0; dx < scale; dx++) data.set([60, 40, 30], (((3 + r) * scale + dy) * width + (x + c) * scale + dx) * 4);
+      });
+      x += g[0].length + 1;
+    }
+    return { data, width, height };
+  };
+  const all = { x: 0, y: 0, w: 90, h: 14 };
+
+  it('글자마다 나누고 쉼표는 뺀다', () => {
+    expect(readNumberSigs(draw('120,384'), all)).toHaveLength(6);
+  });
+
+  it('한 번 알려준 숫자로 글자를 배우면 다른 숫자도 읽는다', () => {
+    const sigs = readNumberSigs(draw('120,384'), all)!;
+    const tmpl: Record<string, string[]> = {};
+    '120384'.split('').forEach((d, i) => (tmpl[d] ??= []).push(sigs[i]));
+    expect(matchNumber(readNumberSigs(draw('4,210'), all)!, tmpl)).toBe(4210);
+    expect(matchNumber(readNumberSigs(draw('83'), all)!, tmpl)).toBe(83);
+  });
+
+  it('2배 크기 화면에서도 같은 모양으로 읽는다', () => {
+    const sigs = readNumberSigs(draw('120,384'), all)!;
+    const tmpl: Record<string, string[]> = {};
+    '120384'.split('').forEach((d, i) => (tmpl[d] ??= []).push(sigs[i]));
+    expect(matchNumber(readNumberSigs(draw('3,021', 2), { x: 0, y: 0, w: 180, h: 28 })!, tmpl)).toBe(3021);
+  });
+
+  it('모르는 글자가 있으면 null', () => {
+    expect(matchNumber(readNumberSigs(draw('12'), all)!, {})).toBeNull();
   });
 });

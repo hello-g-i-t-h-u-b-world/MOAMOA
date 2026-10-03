@@ -746,3 +746,54 @@ button:disabled {
 .move.later {
   opacity: 0.8;
 }
+
+/* 계산 중: 판을 멈추고 위에 안내 */
+.board-wrap {
+  position: relative;
+}
+.board-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: rgba(10, 14, 20, 0.55);
+  color: #fff;
+  font-size: 18px;
+  border-radius: 8px;
+  text-align: center;
+  padding: 12px;
+  pointer-events: none;
+}
+.board-overlay[hidden] {
+  display: none;
+}
+.board-overlay small {
+  font-size: 12px;
+  opacity: 0.85;
+}
+.spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.num-form {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+.num-form input {
+  width: 110px;
+}

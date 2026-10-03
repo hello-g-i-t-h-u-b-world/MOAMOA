@@ -10,6 +10,8 @@ export interface DigitExport {
   digits: DigitTemplates;
   /** '다음 능력 획득까지' 숫자 (글꼴이 달라 따로 학습) */
   dropDigits?: DigitTemplates;
+  /** 점수·제거한 줄 수의 숫자 (0~9) */
+  numDigits?: DigitTemplates;
 }
 
 /** 기본 내장값에 없는(사용자가 학습시킨) 것만 */
@@ -27,14 +29,18 @@ export function makeExport(
   defaults: DigitTemplates,
   dropAll: DigitTemplates = {},
   dropDefaults: DigitTemplates = {},
+  numAll: DigitTemplates = {},
+  numDefaults: DigitTemplates = {},
 ): DigitExport {
   const dropDigits = learnedOnly(dropAll, dropDefaults);
+  const numDigits = learnedOnly(numAll, numDefaults);
   return {
     app: 'moamoa-digits',
     version: 2,
     exportedAt: new Date().toISOString(),
     digits: learnedOnly(all, defaults),
     ...(Object.keys(dropDigits).length ? { dropDigits } : {}),
+    ...(Object.keys(numDigits).length ? { numDigits } : {}),
   };
 }
 
@@ -61,11 +67,15 @@ export function isValidSig(sig: unknown): sig is DigitSig {
  * - 이미 있는 모양은 건너뜀
  * - 다른 숫자로 학습된 모양과 거의 같으면(잘못 답했을 가능성) 넣지 않고 보고
  */
-export function mergeDigits(base: DigitTemplates, incoming: DigitTemplates): { merged: DigitTemplates; report: MergeReport } {
+export function mergeDigits(
+  base: DigitTemplates,
+  incoming: DigitTemplates,
+  maxDigit = INVENTORY_CAP,
+): { merged: DigitTemplates; report: MergeReport } {
   const merged: DigitTemplates = structuredClone(base);
   const report: MergeReport = { added: [], duplicates: 0, conflicts: [], invalid: [] };
   for (const [digit, sigs] of Object.entries(incoming ?? {})) {
-    if (!/^\d$/.test(digit) || Number(digit) > INVENTORY_CAP) {
+    if (!/^\d$/.test(digit) || Number(digit) > maxDigit) {
       report.invalid.push(`숫자 ${digit}`);
       continue;
     }

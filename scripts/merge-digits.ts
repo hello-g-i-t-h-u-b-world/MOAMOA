@@ -17,6 +17,7 @@ if (!files.length) {
 const SETS = [
   { field: 'digits', path: 'src/capture/digits.json', name: '보유 능력 개수' },
   { field: 'dropDigits', path: 'src/capture/drop-digits.json', name: '다음 능력 획득까지' },
+  { field: 'numDigits', path: 'src/capture/num-digits.json', name: '점수·제거한 줄 수', maxDigit: 9 },
 ] as const;
 for (const set of SETS) {
   let current: DigitTemplates = JSON.parse(readFileSync(set.path, 'utf8'));
@@ -26,7 +27,7 @@ for (const set of SETS) {
     const data = JSON.parse(readFileSync(f, 'utf8'));
     const incoming: DigitTemplates = data[set.field] ?? {};
     if (!Object.keys(incoming).length) continue;
-    const { merged, report } = mergeDigits(current, incoming);
+    const { merged, report } = mergeDigits(current, incoming, 'maxDigit' in set ? set.maxDigit : undefined);
     current = merged;
     total += report.added.length;
     console.log(`\n■ ${f}`);

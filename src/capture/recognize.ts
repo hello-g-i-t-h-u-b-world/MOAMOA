@@ -4,6 +4,7 @@ import { H, W, emptyRows, type Item, type Rows } from '../core/board';
 import { PIECES, PIECE_TYPES, normalize, type Cell, type PieceType } from '../core/pieces';
 import builtinDigits from './digits.json';
 import builtinDropDigits from './drop-digits.json';
+import builtinNumDigits from './num-digits.json';
 
 export interface Rect {
   x: number;
@@ -349,7 +350,15 @@ function darkDigitWeight([r]: RGB): number {
 }
 
 /** light: 보유 능력 동그라미 안의 밝은 숫자 / dark: '다음 능력 획득까지'의 진한 숫자 */
-export type DigitStyle = 'light' | 'dark';
+export type DigitStyle = 'light' | 'dark' | { bg: RGB; fg: RGB };
+
+/** 글자색·배경색을 알 때: 두 색 사이 어디쯤인지 (0 = 배경, 1 = 글자) */
+function colorWeight(bg: RGB, fg: RGB) {
+  const dv = [fg[0] - bg[0], fg[1] - bg[1], fg[2] - bg[2]];
+  const dd = dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2] || 1;
+  return (p: RGB) =>
+    Math.max(0, Math.min(1, ((p[0] - bg[0]) * dv[0] + (p[1] - bg[1]) * dv[1] + (p[2] - bg[2]) * dv[2]) / dd));
+}
 
 const DIGIT_ROWS = 8;
 
@@ -361,7 +370,7 @@ const DIGIT_ROWS = 8;
 export type DigitSig = string;
 
 export function readDigitSig(f: Frame, rect: Rect, style: DigitStyle = 'light'): DigitSig | null {
-  const weightOf = style === 'dark' ? darkDigitWeight : digitWeight;
+  const weightOf = typeof style === 'object' ? colorWeight(style.bg, style.fg) : style === 'dark' ? darkDigitWeight : digitWeight;
   const x0 = Math.max(0, Math.round(rect.x));
   const y0 = Math.max(0, Math.round(rect.y));
   const x1 = Math.min(f.width, Math.round(rect.x + rect.w));
@@ -385,7 +394,8 @@ export function readDigitSig(f: Frame, rect: Rect, style: DigitStyle = 'light'):
       }
     }
   // 영역 대부분이 밝으면 숫자가 아니라 버튼이 빛나거나 선택된 상태 → 읽지 않음
-  if (strong === 0 || strong > w * h * 0.5) return null;
+  // (글자색을 알려준 경우는 글자 하나만 감싼 좁은 영역이라 이 검사를 하지 않는다)
+  if (strong === 0 || (typeof style !== 'object' && strong > w * h * 0.5)) return null;
 
   // 숫자 가장자리 픽셀은 숫자색과 동그라미색이 섞여 있다. 두 색 사이 어디쯤인지로
   // '숫자가 덮은 비율'을 구하면 배율과 상관없이 비례한다.
@@ -397,8 +407,10 @@ export function readDigitSig(f: Frame, rect: Rect, style: DigitStyle = 'light'):
       if (v < 0.02) bgPx.push(pixel(f, x0 + x, y0 + y));
       else if (v >= 0.9) fgPx.push(pixel(f, x0 + x, y0 + y));
     }
-  const bg = bgPx.length ? median(bgPx) : ((style === 'dark' ? [190, 255, 255] : [39, 115, 203]) as RGB);
-  const fg = fgPx.length ? median(fgPx) : ((style === 'dark' ? [27, 137, 154] : [255, 230, 163]) as RGB);
+  const defBg: RGB = typeof style === 'object' ? style.bg : style === 'dark' ? [190, 255, 255] : [39, 115, 203];
+  const defFg: RGB = typeof style === 'object' ? style.fg : style === 'dark' ? [27, 137, 154] : [255, 230, 163];
+  const bg = bgPx.length ? median(bgPx) : defBg;
+  const fg = fgPx.length ? median(fgPx) : defFg;
   const dv = [fg[0] - bg[0], fg[1] - bg[1], fg[2] - bg[2]];
   const dd = dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2] || 1;
   const weight = new Float32Array(w * h);
@@ -439,7 +451,7 @@ export function readDigitSig(f: Frame, rect: Rect, style: DigitStyle = 'light'):
   };
   const ys = run(rowMax);
   if (!ys) return null;
-  if (style === 'dark') {
+  if (style !== 'light') {
     // 진한 숫자는 위아래의 글자('다음 능력 획득까지' 등)가 영역에 걸리기 쉽다 → 숫자 줄 안의 열만 본다
     colMax.fill(0);
     for (let y = ys[0]; y < ys[1]; y++)
@@ -486,6 +498,84 @@ export function readDigitSig(f: Frame, rect: Rect, style: DigitStyle = 'light'):
   return `${cols}|${levels}`;
 }
 
+/**
+ * 여러 자리 숫자(점수·제거한 줄 수) 읽기: 글자마다 모양 특징을 낸다.
+ * 글자색·배경색을 모르므로 영역 테두리의 색을 배경으로 보고, 배경과 가장 다른 색을 글자색으로 본다.
+ * 글자 사이 빈 열로 나누고, 높이가 낮은 것(쉼표·마침표)은 뺀다.
+ */
+export function readNumberSigs(f: Frame, rect: Rect): DigitSig[] | null {
+  const x0 = Math.max(0, Math.round(rect.x));
+  const y0 = Math.max(0, Math.round(rect.y));
+  const x1 = Math.min(f.width, Math.round(rect.x + rect.w));
+  const y1 = Math.min(f.height, Math.round(rect.y + rect.h));
+  const w = x1 - x0;
+  const h = y1 - y0;
+  if (w < 4 || h < 4) return null;
+  const border: RGB[] = [];
+  for (let x = x0; x < x1; x++) border.push(pixel(f, x, y0), pixel(f, x, y1 - 1));
+  for (let y = y0; y < y1; y++) border.push(pixel(f, x0, y), pixel(f, x1 - 1, y));
+  const bg = median(border);
+  // 글자색: 배경과 가장 다른 픽셀들의 중앙값
+  const far: { p: RGB; d: number }[] = [];
+  for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) far.push({ p: pixel(f, x, y), d: dist(pixel(f, x, y), bg) });
+  const maxD = Math.max(0, ...far.map((e) => e.d));
+  if (maxD < 60) return null; // 글자가 없다
+  const fg = median(far.filter((e) => e.d >= maxD * 0.6).map((e) => e.p));
+  const weight = colorWeight(bg, fg);
+  // 열마다 글자 픽셀이 있는지 → 글자 구간
+  const colOn: boolean[] = [];
+  const rowSpan: [number, number][] = [];
+  for (let x = 0; x < w; x++) {
+    let top = -1;
+    let bottom = -1;
+    for (let y = 0; y < h; y++)
+      if (weight(pixel(f, x0 + x, y0 + y)) >= 0.5) {
+        if (top < 0) top = y;
+        bottom = y;
+      }
+    colOn.push(top >= 0);
+    rowSpan.push([top, bottom]);
+  }
+  const glyphs: { a: number; b: number; top: number; bottom: number }[] = [];
+  for (let x = 0; x < w; ) {
+    if (!colOn[x]) {
+      x++;
+      continue;
+    }
+    const a = x;
+    let top = h;
+    let bottom = -1;
+    while (x < w && colOn[x]) {
+      top = Math.min(top, rowSpan[x][0]);
+      bottom = Math.max(bottom, rowSpan[x][1]);
+      x++;
+    }
+    glyphs.push({ a, b: x, top, bottom });
+  }
+  if (!glyphs.length) return null;
+  const maxH = Math.max(...glyphs.map((g) => g.bottom - g.top + 1));
+  const style = { bg, fg };
+  const sigs: DigitSig[] = [];
+  for (const g of glyphs) {
+    if (g.bottom - g.top + 1 < maxH * 0.6) continue; // 쉼표·마침표
+    const sig = readDigitSig(f, { x: x0 + g.a - 1, y: y0, w: g.b - g.a + 2, h }, style);
+    if (!sig) return null;
+    sigs.push(sig);
+  }
+  return sigs.length ? sigs : null;
+}
+
+/** 글자별 모양 → 숫자. 모르는 글자가 하나라도 있으면 null */
+export function matchNumber(sigs: DigitSig[], templates: DigitTemplates): number | null {
+  let v = 0;
+  for (const s of sigs) {
+    const d = matchDigit(s, templates);
+    if (d === null) return null;
+    v = v * 10 + d;
+  }
+  return v;
+}
+
 /** 숫자 → 학습된 모양들 */
 export type DigitTemplates = Record<string, DigitSig[]>;
 
@@ -494,6 +584,9 @@ export type DigitTemplates = Record<string, DigitSig[]>;
  * 사용자들이 학습시켜 보내준 데이터를 scripts/merge-digits.ts로 검사해 합친다.
  */
 export const DEFAULT_DIGITS: DigitTemplates = builtinDigits;
+
+/** 점수·제거한 줄 수 숫자의 기본 내장 모양 (src/capture/num-digits.json) */
+export const DEFAULT_NUM_DIGITS: DigitTemplates = builtinNumDigits as DigitTemplates;
 
 /** '다음 능력 획득까지' 숫자의 기본 내장 모양 (src/capture/drop-digits.json, 글꼴이 달라 따로 학습) */
 export const DEFAULT_DROP_DIGITS: DigitTemplates = builtinDropDigits as DigitTemplates;
