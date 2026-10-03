@@ -821,7 +821,12 @@ function renderInventory() {
   const learned = learnedDigits(state.digits, DEFAULT_DIGITS);
   const learnedDrop = learnedDigits(state.dropDigits, DEFAULT_DROP_DIGITS);
   const anyLearned = learned.length + learnedDrop.length > 0;
-  if (anyLearned || COUNTER_KEYS.some((k) => state.calib.counters[k])) {
+  const stageCounts = Object.entries(state.pieceStats)
+    .map(([st, c]) => [st, Object.values(c).reduce((a, b) => a + b, 0)] as const)
+    .filter(([, n]) => n > 0)
+    .sort();
+  const anyStats = stageCounts.length > 0;
+  if (anyLearned || anyStats || COUNTER_KEYS.some((k) => state.calib.counters[k])) {
     const row = document.createElement('div');
     row.className = 'digit-learned';
     const text = document.createElement('span');
@@ -830,11 +835,12 @@ function renderInventory() {
     const builtinDrop = Object.keys(DEFAULT_DROP_DIGITS).sort().join(', ') || '없음';
     text.textContent =
       `학습한 숫자 · 보유 개수: ${learned.join(', ') || '없음'} (기본 내장: ${builtin})` +
-      ` · 획득까지: ${learnedDrop.join(', ') || '없음'} (기본 내장: ${builtinDrop})`;
+      ` · 획득까지: ${learnedDrop.join(', ') || '없음'} (기본 내장: ${builtinDrop})` +
+      ` · 받은 조각 ${stageCounts.map(([st, n]) => `${st}단계 ${n}개`).join(', ') || '없음'}`;
     const exp = document.createElement('button');
     exp.textContent = '학습 데이터 내보내기';
-    exp.title = '학습한 숫자를 파일로 저장합니다. 이 파일을 보내주면 모든 사용자의 기본값에 넣을 수 있습니다.';
-    exp.disabled = !anyLearned;
+    exp.title = '학습한 숫자와 받은 조각 통계를 파일로 저장합니다. 이 파일을 보내주면 모든 사용자의 기본값과 조각 확률에 반영할 수 있습니다.';
+    exp.disabled = !anyLearned && !anyStats;
     exp.onclick = exportDigits;
     const reset = document.createElement('button');
     reset.textContent = '숫자 학습 초기화';
